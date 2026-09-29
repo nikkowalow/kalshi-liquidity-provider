@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Kalshi credentials — never commit private keys
+secrets/
+*.pem
+*.key
+
+# Bot runtime output
+logs/

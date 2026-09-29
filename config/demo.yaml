@@ -1,0 +1,63 @@
+# Demo environment: mock funds at https://demo.kalshi.co
+# Credentials: KALSHI_DEMO_KEY_ID / KALSHI_DEMO_PRIVATE_KEY_PATH (see .env.example)
+#
+#   klp check                  # verify keys + connectivity
+#   klp markets                # preview selected markets
+#   klp run                    # dry-run: log quotes, send nothing
+#   klp run --live             # place real (demo) orders
+
+environment: demo
+dry_run: true              # `klp run --live` overrides this
+client_order_prefix: klp   # the bot only ever touches orders with this prefix
+
+loop:
+  interval_seconds: 2
+  reselect_interval_seconds: 600
+  status_check_interval_seconds: 30
+
+rate_limits:               # Basic tier budgets (tokens/sec)
+  read_per_sec: 200
+  write_per_sec: 100
+
+selection:
+  mode: incentives         # demo may have no programs...
+  fallback_to_volume: true # ...so fall back to the most-traded markets
+  max_markets: 3
+  max_per_series: 1         # correlated outcomes: one market per series
+  min_seconds_to_close: 7200
+  min_mid_price: 0.10
+  max_mid_price: 0.90
+  max_spread: 0.10          # wider books have no trustworthy fair value
+  tickers: []              # used when mode: tickers
+  exclude_tickers: []
+
+quoting:
+  placement: reward        # reward | join | improve
+  share_tolerance: 0.10    # take up to 10% less reward share for a deeper price
+  size: 5
+  offset_ticks: 0
+  min_edge: 0.005          # 0.005 allows joining a 1c-wide market
+  skew_per_contract: 0.002
+  max_skew: 0.05
+  min_price: 0.05
+  max_price: 0.95
+  one_sided_edge: 0.05
+  default_target_size: 200
+  default_discount_factor: 0.5
+  post_only: true
+
+risk:
+  max_position_per_market: 20
+  max_total_exposure: 50
+  max_session_loss: 20
+  min_balance: 5
+  fill_burst_contracts: 15
+  fill_burst_window_seconds: 60
+  cooldown_seconds: 120
+  close_buffer_seconds: 1800
+  max_consecutive_errors: 5
+  order_group_contracts_limit: 25
+
+logging:
+  level: INFO
+  file: logs/demo.log

@@ -1,0 +1,62 @@
+# PRODUCTION: real money.
+# Credentials: KALSHI_PROD_KEY_ID / KALSHI_PROD_PRIVATE_KEY_PATH
+# Live trading requires both flags: klp run -c config/prod.yaml --live --confirm-prod
+#
+# Start small. These limits are intentionally tight; raise them only after
+# you have watched the bot's fills and P&L for a while.
+
+environment: prod
+dry_run: true
+client_order_prefix: klp
+
+loop:
+  interval_seconds: 2
+  reselect_interval_seconds: 900
+  status_check_interval_seconds: 30
+
+rate_limits:
+  read_per_sec: 200
+  write_per_sec: 100
+
+selection:
+  mode: incentives
+  fallback_to_volume: false   # in prod, only quote markets that pay rewards
+  max_markets: 3
+  max_per_series: 1         # correlated outcomes: one market per series
+  min_seconds_to_close: 21600
+  min_mid_price: 0.10
+  max_mid_price: 0.90
+  max_spread: 0.10          # wider books have no trustworthy fair value
+  min_daily_reward: 0.50      # skip markets where our estimated take is tiny
+  exclude_tickers: []
+
+quoting:
+  placement: reward
+  share_tolerance: 0.10
+  size: 10
+  offset_ticks: 0
+  min_edge: 0.01
+  skew_per_contract: 0.002
+  max_skew: 0.05
+  min_price: 0.05
+  max_price: 0.95
+  one_sided_edge: 0.05
+  default_target_size: 500
+  default_discount_factor: 0.5
+  post_only: true
+
+risk:
+  max_position_per_market: 30
+  max_total_exposure: 75
+  max_session_loss: 15
+  min_balance: 25
+  fill_burst_contracts: 20
+  fill_burst_window_seconds: 60
+  cooldown_seconds: 300
+  close_buffer_seconds: 3600
+  max_consecutive_errors: 5
+  order_group_contracts_limit: 30
+
+logging:
+  level: INFO
+  file: logs/prod.log
