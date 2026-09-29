@@ -95,14 +95,11 @@ class LiquidityBot:
         s = self.settings
         mode = "DRY-RUN" if s.dry_run else "LIVE"
         log.info("starting in %s environment (%s) against %s", s.environment.value, mode, s.api_url)
-        status = await self.client.get_exchange_status()
+        await self._wait_for_exchange()
+        if self._stop.is_set():
+            return
         balance = await self.client.get_balance()
-        log.info(
-            "exchange_active=%s trading_active=%s balance=$%.2f",
-            status.exchange_active,
-            status.trading_active,
-            balance.balance,
-        )
+        log.info("exchange is up; balance=$%.2f", balance.balance)
         orphans = await self._our_resting_orders()
         if orphans:
             log.warning("found %d resting orders from a previous run; cancelling", len(orphans))
@@ -116,6 +113,22 @@ class LiquidityBot:
                 s.risk.order_group_contracts_limit,
             )
 
+    async def _wait_for_exchange(self) -> None:
+        """Block until the exchange accepts trading (e.g. through maintenance), or stop()."""
+        interval = self.settings.loop.status_check_interval_seconds
+        while not self._stop.is_set():
+            status = await self.client.get_exchange_status()
+            if status.exchange_active and status.trading_active:
+                return
+            log.warning(
+                "exchange not open (exchange_active=%s trading_active=%s); rechecking in %.0fs",
+                status.exchange_active,
+                status.trading_active,
+                interval,
+            )
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+
     async def shutdown(self) -> None:
         log.info("shutting down: cancelling bot orders")
         try:
@@ -125,7 +138,14 @@ class LiquidityBot:
                 "could not cancel bot orders cleanly (%s); cancelling ALL account orders", exc
             )
             if not self.settings.dry_run:
-                await self.client.cancel_all_orders()
+                try:
+                    await self.client.cancel_all_orders()
+                except (KalshiError, httpx.HTTPError) as exc2:
+                    log.critical(
+                        "COULD NOT CANCEL ORDERS (%s). Check open orders and run `klp cancel` "
+                        "once the exchange is reachable.",
+                        exc2,
+                    )
         group = self.executor.order_group_id
         if group:
             try:

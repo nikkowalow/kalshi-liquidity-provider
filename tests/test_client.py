@@ -199,3 +199,13 @@ async def test_incentive_programs_parsing(client: KalshiClient) -> None:
     assert p.reward_per_day == D(10)
     assert p.discount_factor == D("0.5")
     assert p.target_size == D(300)
+
+
+@respx.mock
+async def test_exchange_status_503_during_maintenance(client: KalshiClient) -> None:
+    route = respx.get(f"{BASE}/exchange/status").respond(
+        503, json={"exchange_active": False, "trading_active": False}
+    )
+    status = await client.get_exchange_status()
+    assert not status.exchange_active and not status.trading_active
+    assert route.call_count == 1  # a status answer, not an error to retry

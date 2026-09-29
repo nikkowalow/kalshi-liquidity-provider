@@ -168,7 +168,14 @@ class KalshiClient:
     # ---------------------------------------------------------------- exchange
 
     async def get_exchange_status(self) -> ExchangeStatus:
-        return ExchangeStatus.from_api(await self._request("GET", "/exchange/status"))
+        try:
+            data = await self._request("GET", "/exchange/status", retry_server_errors=False)
+        except KalshiAPIError as exc:
+            # During maintenance Kalshi answers 503 with a normal status body.
+            if exc.status == 503 and isinstance(exc.body, dict) and "exchange_active" in exc.body:
+                return ExchangeStatus.from_api(exc.body)
+            raise
+        return ExchangeStatus.from_api(data)
 
     # ----------------------------------------------------------------- markets
 

@@ -110,3 +110,24 @@ async def test_session_loss_halts_and_cancels(exchange: FakeExchange) -> None:
     await bot.cycle()
     assert bot.risk.halted
     assert not exchange.orders
+
+
+async def test_startup_waits_out_maintenance(exchange: FakeExchange) -> None:
+    exchange.trading_active = False
+    checks = 0
+    original = exchange.get_exchange_status
+
+    async def status():
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            exchange.trading_active = True
+        return await original()
+
+    exchange.get_exchange_status = status  # type: ignore[method-assign]
+    cfg = settings(loop={"status_check_interval_seconds": 0.01})
+    bot = LiquidityBot(cfg, exchange)  # type: ignore[arg-type]
+    await bot.startup()
+    assert checks == 3
+    await bot.cycle()
+    assert exchange.orders  # quoting once the exchange is back
