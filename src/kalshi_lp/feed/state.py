@@ -67,6 +67,7 @@ class MarketState:
         self._books: dict[str, LiveBook] = {}
         self._healthy: set[str] = set()
         self.orders: dict[str, Order] = {}  # the bot's resting orders by order_id
+        self.first_seen: dict[str, float] = {}  # order_id -> when we first knew of it
         self._tombstones: dict[str, float] = {}
         self.positions: dict[str, Position] = {}
         self._live_position: dict[str, Decimal] = {}
@@ -139,6 +140,10 @@ class MarketState:
         self._tombstones = {k: t for k, t in self._tombstones.items() if now - t < _TOMBSTONE_TTL}
         return order_id in self._tombstones
 
+    def order_age(self, order_id: str) -> float:
+        """Seconds since we first knew of this order."""
+        return self._clock() - self.first_seen.get(order_id, self._clock())
+
     def our_orders(self, ticker: str | None = None) -> list[Order]:
         return [o for o in self.orders.values() if ticker is None or o.ticker == ticker]
 
@@ -149,11 +154,13 @@ class MarketState:
             self.remove_order(order.order_id, order.ticker)
             return
         self.orders[order.order_id] = order
+        self.first_seen.setdefault(order.order_id, self._clock())
         self._touch(order.ticker)
 
     def remove_order(self, order_id: str, ticker: str | None = None) -> None:
         self._tombstones[order_id] = self._clock()
         self.queue_ahead.pop(order_id, None)
+        self.first_seen.pop(order_id, None)
         gone = self.orders.pop(order_id, None)
         target = ticker or (gone.ticker if gone else None)
         if target:
@@ -168,6 +175,8 @@ class MarketState:
         }
         for ticker in {o.ticker for o in (*self.orders.values(), *fresh.values())}:
             self._touch(ticker)
+        now = self._clock()
+        self.first_seen = {oid: self.first_seen.get(oid, now) for oid in fresh}
         self.orders = fresh
 
     # -------------------------------------------------------------- positions

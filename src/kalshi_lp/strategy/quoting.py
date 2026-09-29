@@ -54,6 +54,7 @@ class MarketContext:
     allow_increase: bool = True  # False: only quote legs that reduce the position
     # Our current resting order per leg (leg-terms price, real queue position if known).
     resting: Mapping[Leg, OwnOrder] = field(default_factory=dict)
+    resting_age: Mapping[Leg, float] = field(default_factory=dict)  # seconds since placed
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +85,20 @@ class QuoteEngine:
         size = min(self.cfg.size, room)
         return size.to_integral_value(rounding=ROUND_FLOOR) if size > 0 else ZERO
 
-    def _price_cap(self, ctx: MarketContext, leg: Leg, grid: PriceGrid) -> Decimal:
-        """Highest price this leg may bid."""
+    def _price_cap(self, ctx: MarketContext, leg: Leg, grid: PriceGrid) -> Decimal | None:
+        """Highest price this leg may bid, or None if the leg must not be quoted.
+
+        The cushion rule caps the price at the first level (walking down from
+        the best bid) where others' resting size reaches ``min_cushion``, so
+        at least that many contracts sit ahead of us and absorb a sell-off
+        first. A book too thin to provide the cushion isn't quoted at all.
+        """
         cap = self.cfg.max_price
+        if self.cfg.min_cushion > 0:
+            cushion = reference_price(ctx.book.bids(leg), self.cfg.min_cushion)
+            if cushion is None:
+                return None
+            cap = min(cap, cushion)
         best, opp_best = ctx.book.best_bid(leg), ctx.book.best_bid(leg.opposite)
         if best is not None and opp_best is not None:
             cap = min(cap, (best + ONE - opp_best) / 2 - self.cfg.min_edge)
@@ -142,6 +154,8 @@ class QuoteEngine:
 
         grid = ctx.market.grid if leg is Leg.YES else ctx.market.grid.mirrored()
         cap = self._price_cap(ctx, leg, grid)
+        if cap is None:
+            return LegDecision(leg, None, "thin book (no cushion)")
         price, how = self._base_price(ctx, leg, grid, cap, size)
         if price is None:
             return LegDecision(leg, None, how)
@@ -177,19 +191,27 @@ class QuoteEngine:
     ) -> tuple[Decimal, SideScore] | None:
         """Sticky quotes: keep the resting order's price (and queue spot) if it is still good.
 
-        Kept only if it is no more aggressive than the new price (never hold a
-        riskier quote than we'd choose now) and its share, using its real
-        queue position, is within ``share_tolerance`` of the new price's.
-        Moving costs our queue position, so this avoids churn for nothing.
+        A resting order is never kept if it is unsafe: above the cap (which
+        covers crossing, the edge from mid, and the cushion) or below the
+        price floor. Otherwise it is kept if it is younger than
+        ``min_quote_life_seconds``, or if it is no more aggressive than the
+        new price and its share, using its real queue position, is within
+        ``share_tolerance`` of the new price's. Moving costs our place in the
+        queue, so this avoids churn for nothing.
         """
         current = ctx.resting.get(leg)
         if self.cfg.placement != "reward" or current is None or current.price == price:
             return None
-        if not (self.cfg.min_price <= current.price <= min(price, cap)):
-            return None
-        if not grid.is_valid(current.price):
-            return None
+        if not (self.cfg.min_price <= current.price <= cap) or not grid.is_valid(current.price):
+            return None  # unsafe: move now
         kept = score_side(ctx.book.bids(leg), current.price, size, ctx.reward, grid, current.ahead)
+        age = ctx.resting_age.get(leg)
+        young = age is not None and age < self.cfg.min_quote_life_seconds
+        holding = leg.inventory(ctx.position) > 0
+        if young and not (holding and current.price > price):
+            return current.price, kept
+        if current.price > price:
+            return None  # never hold a riskier quote than we'd choose now
         if kept.share >= score.share * (ONE - self.cfg.share_tolerance):
             return current.price, kept
         return None

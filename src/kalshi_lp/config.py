@@ -93,6 +93,14 @@ class SelectionConfig(_Section):
         description="Skip markets with a wider YES spread: their mid is not a fair value.",
     )
     min_daily_reward: Decimal = Field(Decimal("0"), ge=0)
+    min_period_payout: Decimal = Field(
+        Decimal("0"),
+        ge=0,
+        description=(
+            "Skip markets whose projected payout over the program's remaining period is below "
+            "this. Kalshi pays nothing under $1, so spreading thin can earn $0."
+        ),
+    )
     candidate_pool: int = Field(
         25_000, ge=1, description="Max open markets scanned in volume mode (1,000 per read)."
     )
@@ -134,6 +142,23 @@ class QuotingConfig(_Section):
     )
     default_discount_factor: Decimal = Field(Decimal("0.5"), gt=0, le=1)
     post_only: bool = True
+    min_cushion: Decimal = Field(
+        Decimal("0"),
+        ge=0,
+        description=(
+            "Only quote where at least this many contracts from other traders rest ahead of "
+            "us (at our price or better). A sell-off must eat through them before reaching us, "
+            "and the bot backs away as they disappear. 0 disables."
+        ),
+    )
+    min_quote_life_seconds: float = Field(
+        0,
+        ge=0,
+        description=(
+            "Don't move a resting order for reward reasons until it is this old (safety moves "
+            "still happen immediately). Stops churn and keeps queue position."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_bounds(self) -> QuotingConfig:
@@ -168,6 +193,15 @@ class RiskConfig(_Section):
         900, ge=0, description="Stop quoting this long before a market closes."
     )
     max_consecutive_errors: int = Field(5, ge=1)
+    max_mid_move: Decimal | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Pause a market (cooldown_seconds) if its mid moves this much (dollars) within "
+            "mid_move_window_seconds: fast moves mean news, and resting orders get picked off."
+        ),
+    )
+    mid_move_window_seconds: float = Field(30, gt=0)
     order_group_contracts_limit: int = Field(
         50, ge=0, description="Exchange-side fill cap per rolling 15s window (0 disables)."
     )

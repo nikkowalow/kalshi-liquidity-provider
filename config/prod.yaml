@@ -25,22 +25,23 @@ rate_limits:
 selection:
   mode: incentives
   fallback_to_volume: false # in prod, only quote markets that pay rewards
-  max_markets: 10
-  max_per_series: 1 # correlated outcomes: one market per series
-  min_seconds_to_close: 21600
-  min_mid_price: 0.10
-  max_mid_price: 0.90
+  max_markets: 8 # each market locks ~$1 per contract of size: 8 x 4 = ~$32 of max_capital
+  max_per_series: 2 # e.g. several KXWORLDNEWSMENTION words; weakly correlated, big programs
+  min_seconds_to_close: 21600 # 6h; close_buffer_seconds pulls quotes 2h before close anyway
+  min_mid_price: 0.10 # below this a 5c move is a 50%+ loss
+  max_mid_price: 0.85
   max_spread: 0.10 # wider books have no trustworthy fair value
-  min_daily_reward: 0.50 # skip markets where our estimated take is tiny
+  min_daily_reward: 0 # off: $0.40/day for 5 days still pays $2. The payout filter decides
+  min_period_payout: 1.25 # projected payout until period end/market close; Kalshi pays nothing under $1
   exclude_tickers: []
 
 quoting:
   placement: reward
-  share_tolerance: 0.10
-  size: 2
+  share_tolerance: 0.25 # accept 25% less reward share for a deeper, safer price
+  size: 4
   offset_ticks: 0
   min_edge: 0.01
-  skew_per_contract: 0.002
+  skew_per_contract: 0.005 # 4 contracts held -> quotes shift 2c away
   max_skew: 0.05
   min_price: 0.05
   max_price: 0.95
@@ -48,19 +49,23 @@ quoting:
   default_target_size: 500
   default_discount_factor: 0.5
   post_only: true
+  min_cushion: 100 # >=100 others' contracts ahead of us, or don't quote that side
+  min_quote_life_seconds: 10 # no reward-chasing moves for 10s (safety moves still immediate)
 
 risk:
-  max_capital: 10 # $ cap: position cost + cash locked in resting orders
-  max_position_per_market: 30
+  max_capital: 40 # $ cap: position cost + cash locked in resting orders
+  max_position_per_market: 8 # one fill's worth; then only the reducing side quotes
   max_total_exposure: 75
-  max_session_loss: 5
+  max_session_loss: 3
   min_balance: 0 # cash floor; max_capital already bounds what the bot uses
-  fill_burst_contracts: 20
-  fill_burst_window_seconds: 60
-  cooldown_seconds: 300
-  close_buffer_seconds: 3600
+  fill_burst_contracts: 4 # any full fill pauses that market...
+  fill_burst_window_seconds: 300
+  cooldown_seconds: 600 # ...for 10 minutes
+  close_buffer_seconds: 7200
   max_consecutive_errors: 5
-  order_group_contracts_limit: 30
+  max_mid_move: 0.04 # mid moves 4c within 60s -> news; pause the market
+  mid_move_window_seconds: 60
+  order_group_contracts_limit: 8
 
 logging:
   level: INFO

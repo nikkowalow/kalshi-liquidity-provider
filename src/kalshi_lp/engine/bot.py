@@ -26,6 +26,7 @@ import contextlib
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from decimal import Decimal
 from typing import Any, Protocol
@@ -39,7 +40,7 @@ from kalshi_lp.engine import budget
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
 from kalshi_lp.engine.reconciler import Plan, reconcile
 from kalshi_lp.engine.reward_tracker import RewardTracker, own_orders_by_leg, strip_own
-from kalshi_lp.engine.risk import RiskManager, RiskView
+from kalshi_lp.engine.risk import Mark, RiskManager, RiskView
 from kalshi_lp.exchange.auth import Signer
 from kalshi_lp.exchange.client import KalshiClient
 from kalshi_lp.exchange.errors import KalshiError
@@ -105,6 +106,7 @@ class LiquidityBot:
         self._quote_sig: dict[str, tuple[str, ...]] = {}
         self._decisions: dict[str, dict[Leg, LegDecision]] = {}
         self._last_view: RiskView | None = None
+        self._mids: dict[str, deque[tuple[float, Decimal]]] = {}
         self.started_at = time.time()
         self._group_needs_reset = False
         self._budget_binding = False
@@ -175,6 +177,18 @@ class LiquidityBot:
         log.info("exchange is up; balance=$%.2f", self.state.balance or ZERO)
         if s.risk.max_capital is not None:
             log.info("capital budget: $%.2f (positions + resting orders)", s.risk.max_capital)
+            # A bid plus an ask of N contracts locks about N dollars.
+            wanted = s.selection.max_markets * s.quoting.size
+            if wanted > s.risk.max_capital:
+                log.warning(
+                    "budget spread thin: %d markets x %s contracts wants ~$%s but max_capital is "
+                    "$%s; some quotes will be shrunk or skipped. Lower selection.max_markets or "
+                    "quoting.size.",
+                    s.selection.max_markets,
+                    s.quoting.size,
+                    wanted,
+                    s.risk.max_capital,
+                )
 
         orphans = self.state.our_orders()
         if orphans:
@@ -339,10 +353,10 @@ class LiquidityBot:
                 break
 
     def _risk_view(self) -> RiskView:
-        marks: dict[str, Decimal | None] = {}
+        marks: dict[str, Mark | None] = {}
         for ticker in self.markets:
             book = self.state.book(ticker)
-            marks[ticker] = book.mid if book else None
+            marks[ticker] = (book.best_yes_bid, book.best_yes_ask) if book else None
         return self.risk.update(
             set(self.markets),
             self.state.positions,
@@ -417,8 +431,16 @@ class LiquidityBot:
             or self.risk.near_close(market)
         ):
             return None
-        own = own_orders_by_leg(self.state.our_orders(ticker), self.state.queue_ahead)
-        resting = {leg: max(orders, key=lambda o: o.size) for leg, orders in own.items() if orders}
+        if self._moved_too_fast(ticker, book.mid):
+            return None
+        orders = self.state.our_orders(ticker)
+        own = own_orders_by_leg(orders, self.state.queue_ahead)
+        resting = {leg: max(os, key=lambda o: o.size) for leg, os in own.items() if os}
+        ages = {}
+        for leg in resting:
+            leg_orders = [o for o in orders if o.leg is leg]
+            biggest = max(leg_orders, key=lambda o: o.remaining)
+            ages[leg] = self.state.order_age(biggest.order_id)
         ctx = MarketContext(
             market=market,
             book=strip_own(book, own),
@@ -426,11 +448,32 @@ class LiquidityBot:
             reward=self.rewards.get(ticker, self.selector.default_reward()),
             allow_increase=view.allow_increase and ticker not in self.reduce_only,
             resting=resting,
+            resting_age=ages,
         )
         decisions = self.engine.quote(ctx)
         self._desired[ticker] = [d.quote for d in decisions.values() if d.quote]
         self._decisions[ticker] = decisions
         return decisions
+
+    def _moved_too_fast(self, ticker: str, mid: Decimal | None) -> bool:
+        """Move guard: pause a market whose mid moved ``max_mid_move`` within the window."""
+        limit = self.settings.risk.max_mid_move
+        if limit is None or mid is None:
+            return False
+        now = time.monotonic()
+        window = self.settings.risk.mid_move_window_seconds
+        history = self._mids.setdefault(ticker, deque())
+        history.append((now, mid))
+        while history and now - history[0][0] > window:
+            history.popleft()
+        mids = [m for _, m in history]
+        if max(mids) - min(mids) >= limit:
+            self.risk.pause_market(
+                ticker, f"mid moved {max(mids) - min(mids):.2f} within {window:.0f}s"
+            )
+            history.clear()
+            return True
+        return False
 
     def _note_quotes(
         self, ticker: str, decisions: dict[Leg, LegDecision], quotes: list[Quote]

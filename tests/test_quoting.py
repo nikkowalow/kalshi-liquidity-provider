@@ -153,3 +153,39 @@ def test_sticky_quote_keeps_queue_position(quoting_cfg, reward) -> None:
         )
     )[Leg.YES]
     assert riskier.quote.price == D("0.35")
+
+
+def test_cushion_keeps_others_ahead_of_us(quoting_cfg, reward) -> None:
+    cfg = quoting_cfg.model_copy(update={"min_cushion": D(50), "placement": "join"})
+    # YES bids: 20 @ 0.40, 40 @ 0.39, 100 @ 0.38 -> 50 contracts ahead first reached at 0.39.
+    book = make_book(yes=[("0.40", 20), ("0.39", 40), ("0.38", 100)], no=[("0.55", 200)])
+    d = quote(cfg, reward, book)
+    assert d[Leg.YES].quote.price == D("0.39")  # joins behind 60 contracts, not at the top
+    thin = make_book(yes=[("0.40", 20)], no=[("0.55", 200)])
+    d = quote(cfg, reward, thin)
+    assert d[Leg.YES].quote is None and "cushion" in d[Leg.YES].reason
+
+
+def test_young_orders_are_not_moved_for_reward_but_are_for_safety(quoting_cfg, reward) -> None:
+    from kalshi_lp.strategy.rewards import OwnOrder
+
+    cfg = quoting_cfg.model_copy(update={"min_quote_life_seconds": 10})
+    engine = QuoteEngine(cfg, MAX_POS)
+    book = make_book(yes=[("0.40", 5), ("0.39", 10), ("0.30", 200)], no=[("0.50", 200)])
+
+    def at(price: str, age: float, position: int = 0):
+        ctx = MarketContext(
+            make_market(),
+            book,
+            D(position),
+            reward,
+            resting={Leg.YES: OwnOrder(D(price), D(10), D(0))},
+            resting_age={Leg.YES: age},
+        )
+        return engine.quote(ctx)[Leg.YES].quote.price
+
+    assert at("0.31", age=2) == D("0.31")  # young: stays even though 0.35 earns more
+    assert at("0.31", age=20) == D("0.35")  # old enough: moves
+    assert at("0.39", age=2) == D("0.39")  # young and flat: stays
+    assert at("0.39", age=2, position=10) < D("0.39")  # holding inventory: back off now
+    assert at("0.46", age=2) != D("0.46")  # above the cap (inside min_edge): unsafe, moves

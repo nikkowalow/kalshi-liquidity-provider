@@ -34,19 +34,44 @@ from kalshi_lp.exchange.models import Market, Position
 log = logging.getLogger(__name__)
 
 
-def position_pnl(pos: Position, yes_mark: Decimal | None) -> Decimal:
-    """Lifetime P&L in a market: realized minus fees plus unrealized at ``yes_mark``.
+# (best YES bid, best YES ask); either side may be missing. A bare Decimal means a mid.
+Mark = tuple[Decimal | None, Decimal | None] | Decimal
 
-    Without a mark we value the position at cost. Fees are subtracted even if
-    Kalshi's realized figure already nets them, which errs on the side of
-    reporting a larger loss.
+
+def mark_value(position: Decimal, mark: Mark) -> Decimal:
+    """What a position is worth at ``mark``.
+
+    With both sides of the book, value at the mid. With a side missing, use
+    what the position could actually be sold for: a long YES needs a YES bid
+    to sell into and a long NO needs a YES ask. If that side is empty, the
+    position is marked at zero. After a crash empties the bid side, the loss
+    shows in full instead of hiding behind the old price.
     """
-    if yes_mark is None or pos.position == 0:
-        value = pos.market_exposure
-    elif pos.position > 0:
-        value = pos.position * yes_mark
+    bid: Decimal | None
+    ask: Decimal | None
+    if isinstance(mark, Decimal):
+        bid = ask = mark
     else:
-        value = -pos.position * (ONE - yes_mark)
+        bid, ask = mark
+    if bid is not None and ask is not None:
+        yes = (bid + ask) / 2
+        return position * yes if position > 0 else -position * (ONE - yes)
+    if position > 0:
+        return position * bid if bid is not None else ZERO
+    return -position * (ONE - ask) if ask is not None else ZERO
+
+
+def position_pnl(pos: Position, mark: Mark | None) -> Decimal:
+    """Lifetime P&L in a market: realized minus fees plus unrealized at ``mark``.
+
+    With no mark at all (never seen the book), the position is valued at cost.
+    Fees are subtracted even if Kalshi's realized figure already nets them,
+    which errs toward reporting a larger loss.
+    """
+    if mark is None or pos.position == 0:
+        value = pos.market_exposure
+    else:
+        value = mark_value(pos.position, mark)
     return pos.realized_pnl - pos.fees_paid + value - pos.market_exposure
 
 
@@ -100,6 +125,13 @@ class RiskManager:
     def globally_paused(self) -> bool:
         return self._clock() < self._pause_until
 
+    def pause_market(self, ticker: str, reason: str) -> None:
+        if not self.market_paused(ticker):
+            log.warning(
+                "%s: %s; pausing market for %.0fs", ticker, reason, self.cfg.cooldown_seconds
+            )
+        self._market_pause_until[ticker] = self._clock() + self.cfg.cooldown_seconds
+
     def market_paused(self, ticker: str) -> bool:
         return self._clock() < self._market_pause_until.get(ticker, 0.0)
 
@@ -134,7 +166,7 @@ class RiskManager:
         self,
         tickers: set[str],
         positions: Mapping[str, Position],
-        marks: Mapping[str, Decimal | None],
+        marks: Mapping[str, Mark | None],
         balance: Decimal,
         live_positions: Mapping[str, Decimal] | None = None,
     ) -> RiskView:
@@ -145,8 +177,11 @@ class RiskManager:
             pos = positions.get(ticker, Position.flat(ticker))
             live = live_positions.get(ticker, pos.position) if live_positions else pos.position
             self._track_fills(ticker, live, now)
-            if ticker in positions:
-                self._last_pnl[ticker] = position_pnl(pos, marks.get(ticker))
+            mark = marks.get(ticker)
+            if mark is None and ticker in self._last_pnl:
+                pass  # book unavailable (blind): keep the last valuation rather than cost
+            elif ticker in positions:
+                self._last_pnl[ticker] = position_pnl(pos, mark)
             pnl = self._last_pnl.get(ticker, ZERO)
             baseline = self._baseline.setdefault(ticker, pnl)
             session_pnl += pnl - baseline

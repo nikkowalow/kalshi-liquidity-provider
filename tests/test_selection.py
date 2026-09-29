@@ -71,3 +71,60 @@ async def test_caps_markets_per_series() -> None:
     ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
     picked = await selector(ex, mode="volume", max_markets=5, max_per_series=1).select()
     assert sorted(series_of(c.ticker) for c in picked) == ["NFL", "RAIN"]
+
+
+async def test_skips_markets_that_cannot_reach_the_payout_minimum() -> None:
+    now = datetime.now(UTC)
+    ex = FakeExchange(
+        [make_market("BIG-1"), make_market("SMALL-1")], {"BIG-1": BOOK, "SMALL-1": BOOK}
+    )
+    ex.programs = [
+        IncentiveProgram(  # $200/day for a full day left
+            "b",
+            "BIG-1",
+            "liquidity",
+            now - timedelta(days=1),
+            now + timedelta(days=1),
+            D(400),
+            False,
+            D("0.5"),
+            D(100),
+        ),
+        IncentiveProgram(  # same rate, but the period ends in 10 minutes
+            "s",
+            "SMALL-1",
+            "liquidity",
+            now - timedelta(days=1),
+            now + timedelta(minutes=10),
+            D(200) * D(1 + 10 / 1440),
+            False,
+            D("0.5"),
+            D(100),
+        ),
+    ]
+    picked = await selector(ex, mode="incentives", min_period_payout=D("1.0")).select()
+    assert [c.ticker for c in picked] == ["BIG-1"]
+    assert picked[0].est_period_payout >= 1
+
+
+async def test_payout_projection_stops_at_market_close() -> None:
+    now = datetime.now(UTC)
+    # Program runs 3 more days, but the market closes in 7 hours.
+    ex = FakeExchange([make_market("SOON-1", hours_to_close=7)], {"SOON-1": BOOK})
+    ex.programs = [
+        IncentiveProgram(
+            "p",
+            "SOON-1",
+            "liquidity",
+            now - timedelta(days=1),
+            now + timedelta(days=3),
+            D(800),
+            False,
+            D("0.5"),
+            D(100),
+        )
+    ]
+    [c] = await selector(ex, mode="incentives", min_seconds_to_close=3600).select()
+    assert D("0.28") < c.earning_days_left < D("0.30")  # ~7h, not 3 days
+    expected = c.est_daily_reward * D(7) / 24  # clock ticks between calls, so compare to the cent
+    assert abs(c.est_period_payout - expected) < D("0.01")

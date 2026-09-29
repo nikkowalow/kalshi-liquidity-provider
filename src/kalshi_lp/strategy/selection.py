@@ -44,6 +44,20 @@ class Candidate:
     rank_score: Decimal
 
     @property
+    def earning_days_left(self) -> Decimal:
+        """Days we can still earn: until the program period ends or the market closes."""
+        days = self.reward.days_left()
+        to_close = self.market.seconds_to_close()
+        if to_close is not None:
+            days = min(days, Decimal(max(to_close, 0.0)) / 86_400)
+        return days
+
+    @property
+    def est_period_payout(self) -> Decimal:
+        """Projected payout for the rest of the program period, at the estimated daily rate."""
+        return self.est_daily_reward * self.earning_days_left
+
+    @property
     def ticker(self) -> str:
         return self.market.ticker
 
@@ -84,6 +98,7 @@ class MarketSelector:
                 discount_factor=main.discount_factor or self.quoting.default_discount_factor,
                 full_credit_fraction=self.quoting.full_credit_fraction,
                 reward_per_day=sum((p.reward_per_day for p in progs), ZERO),
+                period_end=main.end,
             )
         return params
 
@@ -138,11 +153,11 @@ class MarketSelector:
 
         if self.cfg.mode == "incentives" and rewards:
             ranked = await self._rank(
-                await self.fetch_markets(list(rewards)), rewards, by_reward=True
+                await self.fetch_markets(list(rewards)), rewards, by_reward=True, limit=None
             )
-            ranked = [c for c in ranked if c.est_daily_reward >= self.cfg.min_daily_reward]
-            if ranked or not self.cfg.fallback_to_volume:
-                return ranked[: self.cfg.max_markets]
+            worth_it = self._explain_and_filter(ranked)
+            if worth_it or not self.cfg.fallback_to_volume:
+                return self._diversify(worth_it, self.cfg.max_markets)
             log.warning("no incentive market passed filters; falling back to volume ranking")
         elif self.cfg.mode == "incentives":
             if not self.cfg.fallback_to_volume:
@@ -153,8 +168,16 @@ class MarketSelector:
         return await self._rank(markets, rewards, by_reward=False)
 
     async def _rank(
-        self, markets: Sequence[Market], rewards: dict[str, RewardParams], *, by_reward: bool
+        self,
+        markets: Sequence[Market],
+        rewards: dict[str, RewardParams],
+        *,
+        by_reward: bool,
+        limit: int | None = -1,
     ) -> list[Candidate]:
+        """Rank quotable markets. ``limit=-1`` means max_markets; None means no limit."""
+        if limit == -1:
+            limit = self.cfg.max_markets
         eligible = [m for m in markets if self.is_eligible(m)]
         if not by_reward:
             # Pre-filter on the market summaries before spending order book reads.
@@ -175,7 +198,40 @@ class MarketSelector:
             rank = est if by_reward else market.volume_24h
             candidates.append(Candidate(market, reward, est, rank))
         candidates.sort(key=lambda c: c.rank_score, reverse=True)
-        return self._diversify(candidates, self.cfg.max_markets)
+        return self._diversify(candidates, len(candidates) if limit is None else limit)
+
+    def _explain_and_filter(self, ranked: list[Candidate]) -> list[Candidate]:
+        """Apply the payout filters, logging why markets were skipped and the near misses."""
+        kept: list[Candidate] = []
+        reasons: dict[str, int] = {}
+        misses: list[Candidate] = []
+        for c in ranked:
+            if c.est_daily_reward <= 0:
+                reason = "earns nothing at our size/price (thin book, deep queue, or no cushion)"
+            elif c.est_daily_reward < self.cfg.min_daily_reward:
+                reason = f"under ${self.cfg.min_daily_reward}/day"
+            elif c.est_period_payout < self.cfg.min_period_payout:
+                reason = f"under ${self.cfg.min_period_payout} before the period ends/market closes"
+            else:
+                kept.append(c)
+                continue
+            reasons[reason] = reasons.get(reason, 0) + 1
+            if c.est_daily_reward > 0:
+                misses.append(c)
+        log.info(
+            "%d of %d quotable rewarded markets pass the payout filters", len(kept), len(ranked)
+        )
+        for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+            log.info("  skipped %4d: %s", n, reason)
+        for c in sorted(misses, key=lambda c: c.est_period_payout, reverse=True)[:5]:
+            log.info(
+                "  near miss: %-44s est $%.2f/day x %.2f days = $%.2f",
+                c.ticker,
+                c.est_daily_reward,
+                c.earning_days_left,
+                c.est_period_payout,
+            )
+        return kept
 
     def _diversify(self, ranked: Sequence[_T], limit: int) -> list[_T]:
         """Take the best-ranked items, at most ``max_per_series`` per series."""

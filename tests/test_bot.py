@@ -223,3 +223,21 @@ async def test_max_capital_caps_positions_plus_resting_orders(exchange: FakeExch
     # Position-reducing asks are still allowed beyond the budget, up to the position size.
     long = exchange.positions[T].position
     assert sum(o.remaining for o in exchange.orders.values() if o.side is Side.ASK) <= long + 2
+
+
+async def test_move_guard_pauses_fast_markets(exchange: FakeExchange) -> None:
+    bot, feed = await started(exchange, risk={"max_mid_move": 0.04})
+    await step(bot, feed)
+    assert exchange.orders
+    exchange.books[T] = make_book(
+        yes=[("0.30", 15), ("0.28", 100)], no=[("0.60", 15), ("0.58", 100)]
+    )
+    await step(bot, feed)  # mid 0.45 -> 0.35 in no time
+    assert bot.risk.market_paused(T)
+    assert not exchange.orders
+
+
+async def test_cushion_config_flows_through_bot(exchange: FakeExchange) -> None:
+    bot, feed = await started(exchange, quoting={"min_cushion": 200})  # book is only 115 deep
+    await step(bot, feed)
+    assert not exchange.orders

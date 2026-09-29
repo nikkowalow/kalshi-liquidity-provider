@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from kalshi_lp.core.orderbook import Level
@@ -36,6 +37,13 @@ class RewardParams:
     discount_factor: Decimal
     full_credit_fraction: Decimal = Decimal("0.2")
     reward_per_day: Decimal = ZERO  # dollars, 0 when the market has no program
+    period_end: datetime | None = None  # when the current program period ends (payout follows)
+
+    def days_left(self, now: datetime | None = None) -> Decimal:
+        if self.period_end is None:
+            return ZERO
+        seconds = (self.period_end - (now or datetime.now(UTC))).total_seconds()
+        return Decimal(max(seconds, 0.0)) / 86_400
 
     @property
     def reference_depth(self) -> Decimal:
