@@ -203,3 +203,23 @@ async def test_run_loop_quotes_and_cleans_up(exchange: FakeExchange) -> None:
     await bot.run(max_requotes=3)
     assert bot.requotes == 3
     assert not exchange.orders  # shutdown cancelled everything
+
+
+async def test_max_capital_caps_positions_plus_resting_orders(exchange: FakeExchange) -> None:
+    # Quotes are 10 @ 0.40 bid ($4.00) and 10 @ 0.50 ask ($5.00): $9 wanted, $5 allowed.
+    bot, feed = await started(exchange, risk={"max_capital": 5})
+    await step(bot, feed)
+    assert bot.capital_in_use() <= 5
+    assert resting(exchange) == [(Side.ASK, D("0.50"), D(2)), (Side.BID, D("0.40"), D(10))]
+
+    # Fills convert locked cash into position cost; replacements must still fit.
+    for _ in range(3):
+        bid = next((o for o in exchange.orders.values() if o.side is Side.BID), None)
+        if bid is None:
+            break
+        exchange.fill(bid.order_id, bid.remaining)
+        await step(bot, feed)
+        assert bot.capital_in_use() <= 5
+    # Position-reducing asks are still allowed beyond the budget, up to the position size.
+    long = exchange.positions[T].position
+    assert sum(o.remaining for o in exchange.orders.values() if o.side is Side.ASK) <= long + 2

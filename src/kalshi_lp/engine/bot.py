@@ -28,12 +28,14 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
 from kalshi_lp.config import Settings
+from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.types import ZERO, Leg, Quote
+from kalshi_lp.engine import budget
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
 from kalshi_lp.engine.reconciler import Plan, reconcile
 from kalshi_lp.engine.reward_tracker import RewardTracker, own_orders_by_leg, strip_own
@@ -44,6 +46,7 @@ from kalshi_lp.exchange.errors import KalshiError
 from kalshi_lp.exchange.models import Market, Order
 from kalshi_lp.feed.state import MarketState
 from kalshi_lp.feed.stream import StreamingFeed
+from kalshi_lp.journal import JournalLogHandler, NullJournal, RunJournal
 from kalshi_lp.strategy.quoting import LegDecision, MarketContext, QuoteEngine
 from kalshi_lp.strategy.rewards import RewardParams, expected_daily_reward
 from kalshi_lp.strategy.selection import MarketSelector
@@ -72,13 +75,16 @@ class LiquidityBot:
         *,
         signer: Signer | None = None,
         feed: Feed | None = None,
+        journal: RunJournal | None = None,
     ):
         self.settings = settings
+        self.journal = journal or NullJournal()
         self.client = client
         if feed is None:
             feed = StreamingFeed(settings.ws_url, signer, MarketState(settings.client_order_prefix))
         self.feed = feed
         self.state = feed.state
+        self.state.listeners.append(self.journal.listener)
         self.engine = QuoteEngine(settings.quoting, settings.risk.max_position_per_market)
         self.selector = MarketSelector(client, settings.selection, settings.quoting, self.engine)
         self.risk = RiskManager(settings.risk)
@@ -96,8 +102,12 @@ class LiquidityBot:
         self.trading_active = True
         self.requotes = 0
         self._desired: dict[str, list[Quote]] = {}  # latest quotes per market (for dry-run)
-        self._dry_logged: dict[str, tuple[str, ...]] = {}
+        self._quote_sig: dict[str, tuple[str, ...]] = {}
+        self._decisions: dict[str, dict[Leg, LegDecision]] = {}
+        self._last_view: RiskView | None = None
+        self.started_at = time.time()
         self._group_needs_reset = False
+        self._budget_binding = False
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
 
@@ -119,6 +129,17 @@ class LiquidityBot:
 
     async def run(self, max_requotes: int | None = None) -> None:
         tasks: list[asyncio.Task[None]] = []
+        handler = JournalLogHandler(self.journal)
+        logging.getLogger("kalshi_lp").addHandler(handler)
+        s = self.settings
+        self.journal.event(
+            "run_start",
+            run_id=self.journal.run_id,
+            environment=s.environment.value,
+            mode="dry-run" if s.dry_run else "live",
+            api_url=s.api_url,
+            config=s.model_dump(mode="json"),
+        )
         try:
             await self.startup()
             if self.stopping:
@@ -126,6 +147,7 @@ class LiquidityBot:
             tasks = [
                 asyncio.create_task(self._maintenance_loop(), name="maintenance"),
                 asyncio.create_task(self._reward_loop(), name="rewards"),
+                asyncio.create_task(self._journal_loop(), name="journal"),
             ]
             await self._quote_loop(max_requotes)
         finally:
@@ -133,6 +155,14 @@ class LiquidityBot:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await self.shutdown()
+            self.journal.event(
+                "run_end", halted=self.risk.halted, reason=self.risk.halt_reason or "stopped"
+            )
+            self.journal.write_state(
+                self.snapshot(status="halted" if self.risk.halted else "ended")
+            )
+            logging.getLogger("kalshi_lp").removeHandler(handler)
+            self.journal.close()
 
     async def startup(self) -> None:
         s = self.settings
@@ -143,6 +173,8 @@ class LiquidityBot:
             return
         await self.sync_from_rest()
         log.info("exchange is up; balance=$%.2f", self.state.balance or ZERO)
+        if s.risk.max_capital is not None:
+            log.info("capital budget: $%.2f (positions + resting orders)", s.risk.max_capital)
 
         orphans = self.state.our_orders()
         if orphans:
@@ -243,6 +275,22 @@ class LiquidityBot:
                 self.rewards[market.ticker] = self.selector.default_reward()
                 self.reduce_only.add(market.ticker)
 
+        self.journal.event(
+            "markets",
+            markets=[
+                {
+                    "ticker": c.ticker,
+                    "title": c.market.title,
+                    "reward_per_day": c.reward.reward_per_day,
+                    "target_size": c.reward.target_size,
+                    "discount_factor": c.reward.discount_factor,
+                    "est_daily_reward": c.est_daily_reward,
+                    "close_time": c.market.close_time,
+                }
+                for c in candidates
+            ],
+            reduce_only=sorted(self.reduce_only),
+        )
         log.info("selected %d markets:", len(candidates))
         for c in candidates:
             log.info(
@@ -310,6 +358,7 @@ class LiquidityBot:
             await self._pull(self.state.our_orders())
             return
         view = self._risk_view()
+        self._last_view = view
         if view.halted:
             await self._pull(self.state.our_orders())
             self.stop()
@@ -328,11 +377,12 @@ class LiquidityBot:
                 self._desired.pop(ticker, None)
                 continue
             quotes = [d.quote for d in decisions.values() if d.quote]
-            if self.settings.dry_run:
-                self._log_dry_run(ticker, decisions, quotes)
-            else:
+            self._note_quotes(ticker, decisions, quotes)
+            if not self.settings.dry_run:
                 plan.extend(reconcile(quotes, own))
 
+        if plan.creates and self.settings.risk.max_capital is not None:
+            self._fit_budget(plan, self.settings.risk.max_capital)
         if not plan:
             return
         report = await self.executor.execute(plan)
@@ -342,11 +392,11 @@ class LiquidityBot:
             self.risk.pause_all("exchange order group tripped (fill limit hit)")
             self._group_needs_reset = True
         log.info(
-            "requote %s: pnl=%+.2f exposure=$%.2f | cancel=%d decrease=%d place=%d "
+            "requote %s: pnl=%+.2f capital=$%.2f | cancel=%d decrease=%d place=%d "
             "rejected=%d errors=%d",
             ",".join(tickers) if len(tickers) <= 3 else f"{len(tickers)} markets",
             view.session_pnl,
-            view.total_exposure,
+            self.capital_in_use(),
             report.cancelled,
             report.decreased,
             report.created,
@@ -379,21 +429,34 @@ class LiquidityBot:
         )
         decisions = self.engine.quote(ctx)
         self._desired[ticker] = [d.quote for d in decisions.values() if d.quote]
+        self._decisions[ticker] = decisions
         return decisions
 
-    def _log_dry_run(
+    def _note_quotes(
         self, ticker: str, decisions: dict[Leg, LegDecision], quotes: list[Quote]
     ) -> None:
+        """Journal (and in dry-run, log) the desired quotes whenever they change."""
         signature = tuple(str(q) for q in quotes)
-        if self._dry_logged.get(ticker) == signature:
-            return  # only log when the quote changes
-        self._dry_logged[ticker] = signature
+        if self._quote_sig.get(ticker) == signature:
+            return
+        self._quote_sig[ticker] = signature
         yes, no = decisions[Leg.YES], decisions[Leg.NO]
         est = (
             expected_daily_reward(yes.score, no.score, self.rewards[ticker])
             if yes.score and no.score and ticker in self.rewards
             else ZERO
         )
+        self.journal.event(
+            "quote",
+            ticker=ticker,
+            position=self.state.position(ticker),
+            yes=_leg_json(yes),
+            no=_leg_json(no),
+            est_daily_reward=est,
+            dry_run=self.settings.dry_run,
+        )
+        if not self.settings.dry_run:
+            return
         log.info(
             "[dry-run] %s pos=%s | YES %s (%s) | NO %s (%s) | est $%.2f/day",
             ticker,
@@ -405,6 +468,36 @@ class LiquidityBot:
             est,
         )
 
+    def capital_in_use(self, excluding: Iterable[Order] = ()) -> Decimal:
+        """Position cost plus cash locked by resting orders, across the bot's markets."""
+        skip = {o.order_id for o in excluding}
+        orders = [o for o in self.state.our_orders() if o.order_id not in skip]
+        tickers = set(self.markets) | {o.ticker for o in orders}
+        live = {t: self.state.position(t) for t in tickers}
+        return budget.capital_in_use(tickers, self.state.positions, live, orders)
+
+    def _fit_budget(self, plan: Plan, max_capital: Decimal) -> None:
+        """Shrink or drop new orders so capital in use stays under ``max_capital``."""
+        shrunk = [
+            Order(o.order_id, o.client_order_id, o.ticker, o.side, o.yes_price, size, o.status)
+            for o, size in plan.decreases
+        ]
+        in_use = self.capital_in_use(excluding=[*plan.cancels, *(o for o, _ in plan.decreases)])
+        in_use += sum(
+            (budget.unit_collateral(o.side, o.yes_price) * o.remaining for o in shrunk), ZERO
+        )
+        live = {q.ticker: self.state.position(q.ticker) for q in plan.creates}
+        wanted = plan.creates
+        plan.creates, _ = budget.fit_to_budget(wanted, max_capital - in_use, live)
+        binding = plan.creates != wanted
+        if binding and not self._budget_binding:
+            log.warning(
+                "capital budget reached: $%.2f of $%.2f in use; new orders shrunk or skipped",
+                in_use,
+                max_capital,
+            )
+        self._budget_binding = binding
+
     async def _pull(self, orders: list[Order]) -> None:
         if orders:
             self._apply(await self.executor.execute(Plan(cancels=orders)))
@@ -413,8 +506,23 @@ class LiquidityBot:
         """Reflect REST results in live state right away (the stream confirms later)."""
         for order in report.gone:
             self.state.remove_order(order.order_id, order.ticker)
-        for order in (*report.placed, *report.resized):
+            self.journal.event("order", action="cancel", **_order_json(order))
+        for order in report.placed:
             self.state.upsert_order(order)
+            self.journal.event("order", action="place", **_order_json(order))
+        for order in report.resized:
+            self.state.upsert_order(order)
+            self.journal.event("order", action="decrease", **_order_json(order))
+        for quote, error in report.rejections:
+            self.journal.event(
+                "order",
+                action="reject",
+                ticker=quote.ticker,
+                side=quote.side.value,
+                price=quote.price,
+                size=quote.size,
+                error=error,
+            )
 
     # ------------------------------------------------------------- maintenance
 
@@ -471,6 +579,91 @@ class LiquidityBot:
             for line in self.tracker.report_lines():
                 log.info(line)
 
+    # ----------------------------------------------------------------- journal
+
+    async def _journal_loop(self) -> None:
+        """Rewrite the state snapshot every second; journal metrics every 10 seconds."""
+        ticks = 0
+        while not self.stopping:
+            await self._sleep(1.0)
+            snap = self.snapshot()
+            self.journal.write_state(snap)
+            if ticks % 10 == 0:
+                self.journal.event("metrics", **snap["totals"])
+            ticks += 1
+
+    def snapshot(self, status: str | None = None) -> dict[str, Any]:
+        """Everything the dashboard shows, as plain JSON-able data."""
+        now = time.monotonic()
+        view = self._last_view
+        rewards_total = self.tracker.total_earned
+        rate = self.tracker.total_hourly_rate()
+        markets = []
+        tickers = list(self.markets) + sorted(
+            {o.ticker for o in self.state.our_orders()} - set(self.markets)
+        )
+        for ticker in tickers:
+            market = self.markets.get(ticker)
+            book = self.state.book(ticker)
+            pos = self.state.positions.get(ticker)
+            params = self.rewards.get(ticker)
+            stats = self.tracker.stats.get(ticker)
+            decisions = self._decisions.get(ticker, {})
+            markets.append(
+                {
+                    "ticker": ticker,
+                    "title": market.title if market else "",
+                    "close_time": market.close_time if market else None,
+                    "reduce_only": ticker in self.reduce_only,
+                    "paused": self.risk.market_paused(ticker),
+                    "near_close": bool(market and self.risk.near_close(market)),
+                    "healthy": self.state.is_healthy(ticker),
+                    "book": _book_json(book),
+                    "position": self.state.position(ticker),
+                    "exposure": pos.market_exposure if pos else 0,
+                    "realized_pnl": pos.realized_pnl if pos else 0,
+                    "fees": pos.fees_paid if pos else 0,
+                    "quotes": {leg.value: _leg_json(d) for leg, d in decisions.items()},
+                    "reward": {
+                        "per_day": params.reward_per_day if params else 0,
+                        "target_size": params.target_size if params else None,
+                        "discount_factor": params.discount_factor if params else None,
+                    },
+                    "earned": stats.earned if stats else 0,
+                    "rate_per_hour": stats.hourly_rate(now) if stats else 0,
+                    "avg_score": stats.avg_score if stats else 0,
+                    "snapshots": stats.snapshots if stats else 0,
+                    "paying_snapshots": stats.scored if stats else 0,
+                }
+            )
+        s = self.settings
+        return {
+            "run_id": self.journal.run_id,
+            "status": status or ("halted" if self.risk.halted else "running"),
+            "environment": s.environment.value,
+            "mode": "dry-run" if s.dry_run else "live",
+            "started_at": self.started_at,
+            "updated_at": time.time(),
+            "ws_connected": self.feed.connected,
+            "trading_active": self.trading_active,
+            "globally_paused": self.risk.globally_paused,
+            "halt_reason": self.risk.halt_reason,
+            "budget_binding": self._budget_binding,
+            "totals": {
+                "balance": self.state.balance,
+                "capital_in_use": self.capital_in_use(),
+                "max_capital": s.risk.max_capital,
+                "session_pnl": view.session_pnl if view else 0,
+                "exposure": view.total_exposure if view else 0,
+                "rewards_earned": rewards_total,
+                "rewards_per_hour": rate,
+                "requotes": self.requotes,
+                "resting_orders": len(self.state.our_orders()),
+            },
+            "markets": markets,
+            "orders": [_order_json(o) for o in self.state.our_orders()],
+        }
+
     # ----------------------------------------------------------------- rewards
 
     async def _reward_loop(self) -> None:
@@ -503,3 +696,37 @@ class LiquidityBot:
                     params,
                     market.grid,
                 )
+
+
+def _leg_json(d: LegDecision) -> dict[str, Any]:
+    return {
+        "side": d.quote.side.value if d.quote else None,
+        "price": d.quote.price if d.quote else None,
+        "size": d.quote.size if d.quote else None,
+        "reason": d.reason,
+        "share": d.score.share if d.score else None,
+    }
+
+
+def _order_json(o: Order) -> dict[str, Any]:
+    return {
+        "order_id": o.order_id,
+        "ticker": o.ticker,
+        "side": o.side.value,
+        "price": o.yes_price,
+        "size": o.remaining,
+    }
+
+
+def _book_json(book: Orderbook | None) -> dict[str, Any] | None:
+    if book is None:
+        return None
+    return {
+        "bid": book.best_yes_bid,
+        "ask": book.best_yes_ask,
+        "mid": book.mid,
+        "bid_size": book.yes[0].size if book.yes else None,
+        "ask_size": book.no[0].size if book.no else None,
+        "yes_depth": book.depth(Leg.YES),
+        "no_depth": book.depth(Leg.NO),
+    }

@@ -75,15 +75,18 @@ class StreamingFeed:
             if self.tickers:
                 self._book_sid = await self.stream.subscribe([BOOK_CHANNEL], sorted(self.tickers))
         log.info("subscribed: %d order books + account channels", len(self.tickers))
+        self.state.emit("ws", {"status": "connected", "tickers": sorted(self.tickers)})
 
     async def _on_disconnect(self) -> None:
         self._book_sid = None
         self.state.invalidate()
+        self.state.emit("ws", {"status": "disconnected"})
 
     async def _on_gap(self, sid: int) -> None:
         if sid != self._book_sid:
             return  # account channels: the periodic REST reconcile covers any miss
         self.state.invalidate(self.tickers)
+        self.state.emit("ws", {"status": "sequence_gap", "sid": sid})
         async with self._lock:
             try:
                 await self.stream.unsubscribe([sid])
@@ -173,6 +176,19 @@ class StreamingFeed:
             count.normalize(),
             body.get("yes_price_dollars"),
             "taker" if body.get("is_taker") else "maker",
+        )
+        self.state.emit(
+            "fill",
+            {
+                "ticker": ticker,
+                "order_id": body.get("order_id"),
+                "side": body.get("book_side"),
+                "price": body.get("yes_price_dollars"),
+                "count": str(count),
+                "is_taker": bool(body.get("is_taker")),
+                "fee": body.get("fee_cost"),
+                "post_position": body.get("post_position_fp"),
+            },
         )
         post = body.get("post_position_fp")
         if post is not None:

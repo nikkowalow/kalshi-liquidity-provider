@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from kalshi_lp.core.types import Quote
 from kalshi_lp.engine.reconciler import Plan
 from kalshi_lp.exchange.client import KalshiClient
 from kalshi_lp.exchange.errors import KalshiAPIError
@@ -33,6 +34,7 @@ class ExecutionReport:
     placed: list[Order] = field(default_factory=list)
     gone: list[Order] = field(default_factory=list)  # cancelled
     resized: list[Order] = field(default_factory=list)
+    rejections: list[tuple[Quote, str]] = field(default_factory=list)
 
 
 class OrderExecutor:
@@ -147,6 +149,7 @@ class OrderExecutor:
                 else:
                     # post-only rejections are expected when the book moves under us
                     report.rejected += 1
+                    report.rejections.append((quote, r.error or "unknown"))
                     log.info("rejected %s %s: %s", quote.ticker, quote, r.error)
                     if r.error and "group" in r.error.lower():
                         report.group_blocked = True

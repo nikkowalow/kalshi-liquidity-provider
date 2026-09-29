@@ -143,6 +143,14 @@ class QuotingConfig(_Section):
 
 
 class RiskConfig(_Section):
+    max_capital: Decimal | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Dollar cap on position cost plus cash locked in resting orders. "
+            "New orders are shrunk or skipped to stay under it. None disables."
+        ),
+    )
     max_position_per_market: Decimal = Field(Decimal("50"), gt=0, description="Contracts.")
     max_total_exposure: Decimal = Field(Decimal("100"), gt=0, description="Dollars at cost.")
     max_session_loss: Decimal = Field(
@@ -181,6 +189,7 @@ class Settings(_Section):
     dry_run: bool = Field(True, description="Compute and log quotes without sending orders.")
     subaccount: int = Field(0, ge=0, le=63)
     client_order_prefix: str = Field("klp", pattern=r"^[A-Za-z0-9]{1,12}$")
+    runs_dir: Path = Field(Path("runs"), description="Run journals for the dashboard.")
     loop: LoopConfig = Field(default_factory=LoopConfig)
     rate_limits: RateLimitConfig = Field(default_factory=RateLimitConfig)
     selection: SelectionConfig = Field(default_factory=SelectionConfig)

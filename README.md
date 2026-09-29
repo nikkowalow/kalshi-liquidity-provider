@@ -97,6 +97,22 @@ spread of at most `max_spread`, so you can still exercise the whole order lifecy
 markets are placeholder 1¢/99¢ books, which that filter skips. Demo prices and fills are not
 representative of production.
 
+## Live dashboard
+
+Every `klp run` writes a journal to `runs/<run-id>/`: `events.jsonl` (orders placed, cancelled,
+shrunk, or rejected, fills, quote changes, market selections, and every log line) and
+`state.json` (a full snapshot, rewritten every second). The dashboard reads the journal live:
+
+```bash
+make dashboard          # then open http://127.0.0.1:8050   (in a second terminal from the bot)
+```
+
+It shows status and KPIs (balance, capital vs. budget, session P&L, estimated rewards and rate);
+per-market book, quotes, position, program, reward share, and earnings; charts of rewards, P&L,
+and capital over time; a filterable blotter; resting orders and fills; the log; market-selection
+history; and the run's config. *Follow latest* jumps to each new run, and past runs stay
+selectable. The server is standard-library only and listens on localhost only.
+
 ## Going to production
 
 ```bash
@@ -119,6 +135,7 @@ and a verified SSN is needed above IRS reporting thresholds. See Kalshi's rules 
 src/kalshi_lp/
 ├── cli.py                 # `klp`: check / markets / rewards / status / run / cancel
 ├── config.py              # typed settings (YAML + env credentials)
+├── journal.py             # per-run event log + state snapshot for the dashboard
 ├── log.py
 ├── core/                  # exchange-agnostic domain types
 │   ├── types.py           #   Side, Leg, Quote, Decimal formatting
@@ -146,6 +163,7 @@ src/kalshi_lp/
     ├── reward_tracker.py  #   live per-second reward scoring
     └── bot.py             #   quoting / maintenance / reward loops
 config/                    # demo.yaml, prod.yaml
+dashboard/                 # live dashboard: stdlib server.py + terminal.html
 tests/                     # unit, WebSocket (local server), end-to-end against a fake exchange
 ```
 
@@ -206,6 +224,7 @@ Each leg (YES bid, NO bid) is priced the same way in its own terms:
 
 | Control | Setting | Action |
 |---|---|---|
+| **Capital budget** | `max_capital` | One dollar cap on position cost plus cash locked in resting orders. New orders are shrunk or skipped to fit. Fills only convert locked cash into position cost, so the total can't grow past the cap. Orders selling contracts you already hold are free |
 | Position limit | `max_position_per_market` | Stop quoting the side that adds to the position |
 | Exposure / balance | `max_total_exposure`, `min_balance` | Reduce-only mode |
 | Fill-burst breaker | `fill_burst_contracts` in `fill_burst_window_seconds` | Pause that market for `cooldown_seconds` |

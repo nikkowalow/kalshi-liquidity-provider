@@ -51,6 +51,7 @@ quoting:
   post_only: true
 
 risk:
+  max_capital: null             # $ cap on positions + resting orders (null = off)
   max_position_per_market: 20
   max_total_exposure: 50
   max_session_loss: 20

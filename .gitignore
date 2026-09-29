@@ -224,3 +224,4 @@ secrets/
 
 # Bot runtime output
 logs/
+runs/

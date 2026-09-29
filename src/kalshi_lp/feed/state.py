@@ -74,6 +74,12 @@ class MarketState:
         self.balance: Decimal | None = None
         self.dirty: set[str] = set()
         self.changed = asyncio.Event()
+        # Observers of notable feed events (fills, connection changes), e.g. the run journal.
+        self.listeners: list[Callable[[str, dict[str, Any]], None]] = []
+
+    def emit(self, kind: str, data: dict[str, Any]) -> None:
+        for listener in self.listeners:
+            listener(kind, data)
 
     # ------------------------------------------------------------ notification
 

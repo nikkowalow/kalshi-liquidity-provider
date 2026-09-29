@@ -28,6 +28,7 @@ from kalshi_lp.exchange.auth import KeyLoadError, Signer
 from kalshi_lp.exchange.client import KalshiClient
 from kalshi_lp.exchange.errors import KalshiError
 from kalshi_lp.exchange.rate_limit import RateLimiter
+from kalshi_lp.journal import RunJournal
 from kalshi_lp.log import setup_logging
 from kalshi_lp.strategy.estimator import RewardEstimator
 from kalshi_lp.strategy.quoting import QuoteEngine
@@ -201,7 +202,11 @@ async def cmd_cancel(settings: Settings, args: argparse.Namespace) -> int:
 async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     signer = build_signer(settings)
     async with build_client(settings, signer) as client:
-        bot = LiquidityBot(settings, client, signer=signer)
+        journal = RunJournal(
+            settings.runs_dir, settings.environment.value, "dry" if settings.dry_run else "live"
+        )
+        log.info("journal: %s (view with: make dashboard)", journal.dir)
+        bot = LiquidityBot(settings, client, signer=signer, journal=journal)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, bot.stop)
