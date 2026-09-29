@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV   := .venv
 BIN    := $(VENV)/bin
 
-.PHONY: install test lint typecheck fmt check markets demo demo-live status cancel clean
+.PHONY: install test lint typecheck fmt check markets rewards demo demo-live status cancel clean
 
 install:            ## create venv and install with dev deps
 	$(PYTHON) -m venv $(VENV)
@@ -28,6 +28,9 @@ check:              ## verify demo credentials
 
 markets:            ## preview demo market selection
 	$(BIN)/klp markets -c config/demo.yaml
+
+rewards:            ## estimate $/day from live production incentive programs (no key needed)
+	$(BIN)/klp rewards -c config/prod.yaml
 
 demo:               ## run against demo, dry-run
 	$(BIN)/klp run -c config/demo.yaml

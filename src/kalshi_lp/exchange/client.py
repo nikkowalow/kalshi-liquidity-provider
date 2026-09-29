@@ -264,6 +264,20 @@ class KalshiClient:
             Order.from_api(o) async for o in self._paginate("/portfolio/orders", "orders", params)
         ]
 
+    async def get_queue_positions(self, tickers: Sequence[str]) -> dict[str, Decimal]:
+        """Contracts ahead of each of our resting orders in its price level's queue."""
+        if not tickers:
+            return {}
+        data = await self._request(
+            "GET",
+            "/portfolio/orders/queue_positions",
+            params={"market_tickers": ",".join(tickers), **self._sub()},
+        )
+        return {
+            q["order_id"]: Decimal(q.get("queue_position_fp") or 0)
+            for q in data.get("queue_positions") or []
+        }
+
     # ------------------------------------------------------------------ orders
 
     def _order_body(

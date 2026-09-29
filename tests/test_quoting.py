@@ -120,3 +120,36 @@ def test_quotes_never_self_cross(quoting_cfg, reward) -> None:
     yes, no = d[Leg.YES].quote, d[Leg.NO].quote
     assert yes is not None and no is not None
     assert yes.price < no.price  # bid below ask
+
+
+def test_sticky_quote_keeps_queue_position(quoting_cfg, reward) -> None:
+    from kalshi_lp.strategy.rewards import OwnOrder
+
+    engine = QuoteEngine(quoting_cfg, MAX_POS)
+    book = make_book(yes=[("0.40", 5), ("0.39", 10), ("0.30", 200)], no=[("0.50", 200)])
+    fresh = engine.quote(MarketContext(make_market(), book, D(0), reward))[Leg.YES]
+    assert fresh.quote.price == D("0.35")
+
+    # Resting at 0.34 with 0 ahead: a tick deeper, share within tolerance -> keep it.
+    kept = engine.quote(
+        MarketContext(
+            make_market(), book, D(0), reward, resting={Leg.YES: OwnOrder(D("0.34"), D(10), D(0))}
+        )
+    )[Leg.YES]
+    assert kept.quote.price == D("0.34") and "kept" in kept.reason
+
+    # Resting at 0.31: share has fallen too far -> move.
+    moved = engine.quote(
+        MarketContext(
+            make_market(), book, D(0), reward, resting={Leg.YES: OwnOrder(D("0.31"), D(10), D(0))}
+        )
+    )[Leg.YES]
+    assert moved.quote.price == D("0.35")
+
+    # Never keep a price more aggressive than we'd choose now.
+    riskier = engine.quote(
+        MarketContext(
+            make_market(), book, D(0), reward, resting={Leg.YES: OwnOrder(D("0.39"), D(10), D(0))}
+        )
+    )[Leg.YES]
+    assert riskier.quote.price == D("0.35")

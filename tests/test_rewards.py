@@ -3,11 +3,14 @@ from decimal import Decimal
 from kalshi_lp.core.orderbook import Level
 from kalshi_lp.core.pricing import PriceGrid
 from kalshi_lp.strategy.rewards import (
+    OwnOrder,
     RewardParams,
     SideScore,
+    earned_per_snapshot,
     expected_daily_reward,
     reference_price,
     score_side,
+    score_snapshot_side,
 )
 
 D = Decimal
@@ -62,3 +65,31 @@ def test_expected_daily_reward(reward: RewardParams) -> None:
     no = SideScore(D("0.4"), True, D("0.5"))
     assert expected_daily_reward(yes, no, reward) == D(50) * D("0.3")
     assert expected_daily_reward(yes, SideScore(D(0), False, None), reward) == 0
+
+
+def test_queue_position_matters(reward: RewardParams) -> None:
+    # 150 others at 0.50: at the back of the queue, 100 of Target Size fills first.
+    others = ladder(("0.50", 150))
+    back = score_side(others, D("0.50"), D(10), reward, GRID)
+    front = score_side(others, D("0.50"), D(10), reward, GRID, ahead=D(0))
+    assert back.share == 0
+    assert front.share == D(10) / D(100)
+
+
+def test_multiple_own_orders_in_queue(reward: RewardParams) -> None:
+    others = ladder(("0.50", 150))
+    score = score_snapshot_side(
+        others,
+        [OwnOrder(D("0.50"), D(10), D(0)), OwnOrder(D("0.50"), D(10), D(85))],
+        reward,
+        GRID,
+    )
+    # First order fully in; second has 85 ahead + our 10 = 95, so 5 of it counts.
+    assert score.share == D(15) / D(100)
+
+
+def test_earned_per_snapshot_matches_program_formula(reward: RewardParams) -> None:
+    # Holding the whole book on both sides (score 2) for every second of a day
+    # earns the full daily reward.
+    full_day = earned_per_snapshot(D(2), reward) * 86_400
+    assert full_day.quantize(D("0.01")) == reward.reward_per_day

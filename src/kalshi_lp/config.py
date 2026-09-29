@@ -28,13 +28,32 @@ API_URLS = {
     Environment.PROD: "https://api.elections.kalshi.com/trade-api/v2",
 }
 
+WS_URLS = {
+    Environment.DEMO: "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2",
+    Environment.PROD: "wss://external-api-ws.kalshi.com/trade-api/ws/v2",
+}
+
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class LoopConfig(_Section):
-    interval_seconds: float = Field(2.0, gt=0, description="Time between quoting cycles.")
+    """Quoting is event-driven off the WebSocket feed; these bound how often things run."""
+
+    requote_min_interval_seconds: float = Field(
+        0.25, ge=0, description="Debounce: minimum time between requotes of the same market."
+    )
+    heartbeat_seconds: float = Field(
+        5, gt=0, description="Requote every market at least this often, even if nothing changed."
+    )
+    reconcile_interval_seconds: float = Field(
+        15, gt=0, description="Cross-check orders, positions and balance over REST."
+    )
+    queue_refresh_seconds: float = Field(
+        10, gt=0, description="Refresh our orders' queue positions (for reward tracking)."
+    )
+    reward_report_seconds: float = Field(60, gt=0, description="Log reward estimates this often.")
     reselect_interval_seconds: float = Field(900, gt=0, description="How often to re-rank markets.")
     status_check_interval_seconds: float = Field(30, gt=0)
 
@@ -172,6 +191,16 @@ class Settings(_Section):
     @property
     def api_url(self) -> str:
         return os.environ.get("KALSHI_API_URL") or API_URLS[self.environment]
+
+    @property
+    def ws_url(self) -> str:
+        return os.environ.get("KALSHI_WS_URL") or WS_URLS[self.environment]
+
+    def has_credentials(self) -> bool:
+        prefix = f"KALSHI_{self.environment.value.upper()}"
+        return bool(
+            os.environ.get(f"{prefix}_KEY_ID") and os.environ.get(f"{prefix}_PRIVATE_KEY_PATH")
+        )
 
     def credentials(self) -> Credentials:
         prefix = f"KALSHI_{self.environment.value.upper()}"

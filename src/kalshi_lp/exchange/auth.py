@@ -20,9 +20,22 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 PrivateKey = RSAPrivateKey | Ed25519PrivateKey
 
 
+class KeyLoadError(ValueError):
+    pass
+
+
 def load_private_key(path: str | Path) -> PrivateKey:
-    data = Path(path).expanduser().read_bytes()
-    key = serialization.load_pem_private_key(data, password=None)
+    path = Path(path).expanduser()
+    data = path.read_bytes()
+    if not data.strip():
+        raise KeyLoadError(f"private key file {path} is empty")
+    try:
+        key = serialization.load_pem_private_key(data, password=None)
+    except ValueError as exc:
+        raise KeyLoadError(
+            f"{path} is not a valid PEM private key (it should start with "
+            "'-----BEGIN ... PRIVATE KEY-----')"
+        ) from exc
     if not isinstance(key, RSAPrivateKey | Ed25519PrivateKey):
         raise TypeError(f"unsupported key type {type(key).__name__}; Kalshi uses RSA or Ed25519")
     return key

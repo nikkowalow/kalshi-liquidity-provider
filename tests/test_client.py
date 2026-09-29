@@ -209,3 +209,16 @@ async def test_exchange_status_503_during_maintenance(client: KalshiClient) -> N
     status = await client.get_exchange_status()
     assert not status.exchange_active and not status.trading_active
     assert route.call_count == 1  # a status answer, not an error to retry
+
+
+@respx.mock
+async def test_queue_positions(client: KalshiClient) -> None:
+    route = respx.get(f"{BASE}/portfolio/orders/queue_positions").respond(
+        json={
+            "queue_positions": [
+                {"order_id": "o1", "market_ticker": "M", "queue_position_fp": "42.00"}
+            ]
+        }
+    )
+    assert await client.get_queue_positions(["M", "N"]) == {"o1": D(42)}
+    assert route.calls[0].request.url.params["market_tickers"] == "M,N"

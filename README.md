@@ -34,6 +34,34 @@ earns nothing.
 A YES `ask` rests on the NO book (a YES ask at 0.52 is a NO bid at 0.48), so one bid plus one ask
 per market covers both reward sides.
 
+## Estimating rewards before you trade
+
+`klp rewards` pulls every active liquidity program and samples the order books several times.
+For each order size, it prices the quotes the bot would actually post and scores them with the
+program's rules. It needs no API key.
+
+```bash
+.venv/bin/klp rewards -c config/prod.yaml                      # real production programs
+.venv/bin/klp rewards -c config/prod.yaml --sizes 10,25,50 --top 40 --samples 5
+```
+
+```
+TICKER                          PROGRAM  TARGET     BOOK    QUOTE  SHARE   @10    @50   @100   @250
+                                  $/day           bid/ask  bid/ask        est. $/day at each order size
+KXAAAGASM-26SEP30-4.44           830.05    1000  .14/.15  .11/.16   2.5%  20.81  94.72 196.26 413.63
+```
+
+Read these as upper bounds. They assume competitors don't respond, that you join the back of each
+queue, and they leave out losses from fills. Each order size is posted on **both** sides, so
+check the capital it ties up.
+
+While the bot runs, a **live earnings tracker** replays Kalshi's scoring once per second, at a
+random moment, on the live book. It uses your orders' real queue positions (from Kalshi's
+queue-position endpoint) and credits `score / 2 × reward_per_day / 86,400` per snapshot, which
+is exactly what the program formula pays for the same book. Every minute it logs estimated
+earnings and the current $/hour, per market. In dry-run, it scores the quotes the bot *would*
+post.
+
 ## Quick start (demo)
 
 **1. Get demo API keys.** Create an account at <https://demo.kalshi.co> (mock funds). Under
@@ -54,6 +82,7 @@ mkdir -p secrets && mv ~/Downloads/<your-key>.key secrets/demo.key
 .venv/bin/klp check                # credentials + connectivity + balance
 .venv/bin/klp markets              # which markets would be quoted, estimated $/day
 .venv/bin/klp run                  # dry-run: logs the quotes it would place, sends nothing
+.venv/bin/klp run --duration 60    # ...and stop after 60 seconds
 .venv/bin/klp run --live           # places real orders on demo (mock money)
 .venv/bin/klp status               # positions and the bot's resting orders
 .venv/bin/klp cancel               # cancel the bot's orders
@@ -88,7 +117,7 @@ and a verified SSN is needed above IRS reporting thresholds. See Kalshi's rules 
 
 ```
 src/kalshi_lp/
-├── cli.py                 # `klp` entry point: check / markets / status / run / cancel
+├── cli.py                 # `klp`: check / markets / rewards / status / run / cancel
 ├── config.py              # typed settings (YAML + env credentials)
 ├── log.py
 ├── core/                  # exchange-agnostic domain types
@@ -99,34 +128,50 @@ src/kalshi_lp/
 │   ├── auth.py            #   RSA-PSS / Ed25519 request signing
 │   ├── rate_limit.py      #   token buckets matching Kalshi's read/write budgets
 │   ├── client.py          #   async REST client (orders, books, portfolio, programs)
+│   ├── ws.py              #   WebSocket client: signed connect, commands, seq checks, reconnect
 │   ├── models.py          #   typed API payloads
 │   └── errors.py
-├── strategy/              # pure pricing logic, no I/O (except selection)
-│   ├── rewards.py         #   model of the incentive program's scoring rules
-│   ├── quoting.py         #   quote engine: placement, skew, edge, limits
-│   └── selection.py       #   rank markets by estimated reward
-└── engine/                # order lifecycle and control loop
+├── feed/                  # real-time state from the WebSocket
+│   ├── state.py           #   live books, our orders, positions, queue positions
+│   └── stream.py          #   channel subscriptions -> state; resync on gaps
+├── strategy/              # pricing logic, no I/O except selection/estimates
+│   ├── rewards.py         #   the incentive program's scoring rules, queue-aware
+│   ├── quoting.py         #   quote engine: placement, stickiness, skew, edge, limits
+│   ├── selection.py       #   rank markets by estimated reward
+│   └── estimator.py       #   `klp rewards`: $/day by order size across live programs
+└── engine/                # order lifecycle and control loops
     ├── reconciler.py      #   desired quotes vs resting orders -> minimal actions
     ├── executor.py        #   batched cancels / decreases / creates, dry-run
     ├── risk.py            #   limits, breakers, kill switch
-    └── bot.py             #   the main loop
+    ├── reward_tracker.py  #   live per-second reward scoring
+    └── bot.py             #   quoting / maintenance / reward loops
 config/                    # demo.yaml, prod.yaml
-tests/                     # unit tests + end-to-end cycles against a fake exchange
+tests/                     # unit, WebSocket (local server), end-to-end against a fake exchange
 ```
 
-## The loop
+## How it runs
 
-Every `interval_seconds` (2s by default):
+Market data and account updates stream over the WebSocket: `orderbook_delta` for the quoted
+markets, plus `user_orders`, `fill`, and `market_positions`. Three loops share that live state:
 
-1. Check exchange status (every 30s) and re-rank markets (every 10–15 min).
-2. Take a snapshot in four reads: the bot's resting orders, positions, balance, and every
-   quoted market's book in one batched call.
-3. Update risk: session P&L, exposure, fill bursts.
-4. Per market: remove the bot's own orders from the book (so it never chases itself), compute
-   the quotes, and diff them against what's resting. Orders that are already right are left
-   alone to keep queue priority, oversized orders are shrunk in place, and everything else is
-   cancelled and replaced.
-5. Send the batched plan: cancels, then decreases, then creates.
+- **Quoting** wakes when a book, one of the bot's orders, or a position changes, debounced by
+  `requote_min_interval_seconds` (0.25s), and at least every `heartbeat_seconds`. It requotes
+  only the markets that changed. For each one it removes the bot's own orders from the book (so
+  it never chases itself), computes quotes, and diffs them against what's resting. Orders that
+  are already right keep their queue priority, oversized orders are shrunk in place, and the
+  rest are cancelled and replaced over REST.
+- **Maintenance** checks exchange status and cross-checks orders, positions, and balance over
+  REST every 15s, which corrects any drift in the streamed state. It also refreshes queue
+  positions, re-ranks markets every 10–15 min, and logs reward estimates.
+- **Reward sampling** scores one snapshot per second (see above).
+
+**Sticky quotes.** Moving an order sends it to the back of the queue. So a resting order keeps
+its price while its reward share, using its real queue position, stays within `share_tolerance`
+of the best new price. The one exception: the bot never holds a price more aggressive than the
+one it would choose now.
+
+**Blind means flat.** If the WebSocket disconnects or skips a sequence number, the affected books
+are marked untrusted and the bot pulls its quotes there until a fresh snapshot arrives.
 
 ## Market selection
 
@@ -186,14 +231,16 @@ make fmt
 
 ## Known limitations and next steps
 
-- **REST polling.** Reaction time is about one loop interval. Moving books and fills onto the
-  WebSocket feed (`orderbook_delta`, `fill`) would cut adverse selection a lot, and is the most
-  valuable next step.
-- **Reward model is an estimate.** It uses the current book as if it lasted all day and assumes
-  our orders join the back of the queue at their price level.
+- **Reward estimates are estimates.** The live tracker samples at its own random instant, not
+  Kalshi's, and refreshes queue positions every 10s. Kalshi's docs don't say whether a queue
+  position counts contracts at better prices, so the tracker reads it as "within the price level,"
+  capped at that level's size. If it actually includes better prices, the tracker undercounts.
+  `klp rewards` also assumes competitors don't react.
+- **Orders go over REST.** Market data is streamed, but orders are placed with REST calls
+  (tens of ms). Kalshi's FIX gateway would be faster.
 - **Fees are not modeled in pricing.** Check each series' maker fees; they come out of spread
   capture.
 - **Session P&L** counts P&L since startup in the markets the bot trades, marked at mid. It
   subtracts fees on top of realized P&L, so it errs toward showing a bigger loss.
-- **Volume ranking** in fallback mode scans the first `candidate_pool` open markets, not the whole
-  exchange.
+- **Volume ranking** in fallback mode scans up to `candidate_pool` open markets (25,000 by
+  default).

@@ -119,7 +119,7 @@ class MarketSelector:
 
     # ------------------------------------------------------------ selection
 
-    async def _markets(self, tickers: Sequence[str]) -> list[Market]:
+    async def fetch_markets(self, tickers: Sequence[str]) -> list[Market]:
         markets: list[Market] = []
         for i in range(0, len(tickers), _TICKERS_PER_MARKETS_CALL):
             chunk = tickers[i : i + _TICKERS_PER_MARKETS_CALL]
@@ -132,10 +132,14 @@ class MarketSelector:
         log.info("active liquidity programs: %d across %d markets", len(programs), len(rewards))
 
         if self.cfg.mode == "tickers":
-            return await self._rank(await self._markets(self.cfg.tickers), rewards, by_reward=False)
+            return await self._rank(
+                await self.fetch_markets(self.cfg.tickers), rewards, by_reward=False
+            )
 
         if self.cfg.mode == "incentives" and rewards:
-            ranked = await self._rank(await self._markets(list(rewards)), rewards, by_reward=True)
+            ranked = await self._rank(
+                await self.fetch_markets(list(rewards)), rewards, by_reward=True
+            )
             ranked = [c for c in ranked if c.est_daily_reward >= self.cfg.min_daily_reward]
             if ranked or not self.cfg.fallback_to_volume:
                 return ranked[: self.cfg.max_markets]

@@ -25,7 +25,8 @@ that queue earns nothing. That is why ``reward`` searches instead.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from decimal import ROUND_FLOOR, Decimal
 
 from kalshi_lp.config import QuotingConfig
@@ -33,7 +34,13 @@ from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.pricing import PriceGrid
 from kalshi_lp.core.types import ONE, ZERO, Leg, Quote
 from kalshi_lp.exchange.models import Market
-from kalshi_lp.strategy.rewards import RewardParams, SideScore, reference_price, score_side
+from kalshi_lp.strategy.rewards import (
+    OwnOrder,
+    RewardParams,
+    SideScore,
+    reference_price,
+    score_side,
+)
 
 _MAX_PRICES_SEARCHED = 100  # bounds work on sub-penny grids
 
@@ -45,6 +52,8 @@ class MarketContext:
     position: Decimal  # + long YES, - long NO
     reward: RewardParams
     allow_increase: bool = True  # False: only quote legs that reduce the position
+    # Our current resting order per leg (leg-terms price, real queue position if known).
+    resting: Mapping[Leg, OwnOrder] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,8 +159,40 @@ class QuoteEngine:
             return LegDecision(leg, None, f"price {price} below floor")
 
         score = score_side(ctx.book.bids(leg), price, size, ctx.reward, grid)
+        kept = self._keep_resting(ctx, leg, grid, price, cap, size, score)
+        if kept is not None:
+            price, score, how = kept[0], kept[1], how + "(kept)"
         quote = Quote(ctx.market.ticker, leg.order_side, leg.to_yes_price(price), size)
         return LegDecision(leg, quote, how, score, price)
+
+    def _keep_resting(
+        self,
+        ctx: MarketContext,
+        leg: Leg,
+        grid: PriceGrid,
+        price: Decimal,
+        cap: Decimal,
+        size: Decimal,
+        score: SideScore,
+    ) -> tuple[Decimal, SideScore] | None:
+        """Sticky quotes: keep the resting order's price (and queue spot) if it is still good.
+
+        Kept only if it is no more aggressive than the new price (never hold a
+        riskier quote than we'd choose now) and its share, using its real
+        queue position, is within ``share_tolerance`` of the new price's.
+        Moving costs our queue position, so this avoids churn for nothing.
+        """
+        current = ctx.resting.get(leg)
+        if self.cfg.placement != "reward" or current is None or current.price == price:
+            return None
+        if not (self.cfg.min_price <= current.price <= min(price, cap)):
+            return None
+        if not grid.is_valid(current.price):
+            return None
+        kept = score_side(ctx.book.bids(leg), current.price, size, ctx.reward, grid, current.ahead)
+        if kept.share >= score.share * (ONE - self.cfg.share_tolerance):
+            return current.price, kept
+        return None
 
     def _prevent_self_cross(
         self, ctx: MarketContext, decisions: dict[Leg, LegDecision]

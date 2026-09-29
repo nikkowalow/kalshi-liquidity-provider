@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from decimal import Decimal
 
 from kalshi_lp.engine.reconciler import Plan
 from kalshi_lp.exchange.client import KalshiClient
@@ -28,6 +29,10 @@ class ExecutionReport:
     rejected: int = 0
     errors: int = 0
     group_blocked: bool = False  # the exchange order group tripped and is refusing orders
+    # What changed, so the caller can update its live order state immediately.
+    placed: list[Order] = field(default_factory=list)
+    gone: list[Order] = field(default_factory=list)  # cancelled
+    resized: list[Order] = field(default_factory=list)
 
 
 class OrderExecutor:
@@ -73,6 +78,17 @@ class OrderExecutor:
             try:
                 await self.client.decrease_order(order, size)
                 report.decreased += 1
+                report.resized.append(
+                    Order(
+                        order.order_id,
+                        order.client_order_id,
+                        order.ticker,
+                        order.side,
+                        order.yes_price,
+                        size,
+                        order.status,
+                    )
+                )
             except KalshiAPIError as exc:
                 report.errors += 1
                 log.warning("decrease %s failed: %s", order.order_id, exc)
@@ -88,9 +104,12 @@ class OrderExecutor:
                 report.errors += 1
                 log.error("batch cancel failed: %s", exc)
                 continue
+            by_id = {o.order_id: o for o in chunk}
             for r in results:
                 if r.ok:
                     report.cancelled += 1
+                    if r.order_id in by_id:
+                        report.gone.append(by_id[r.order_id])
                 else:  # usually "already filled/cancelled": harmless
                     log.info("cancel %s: %s", r.order_id, r.error)
 
@@ -106,12 +125,25 @@ class OrderExecutor:
                 report.errors += 1
                 log.error("batch create failed: %s", exc)
                 continue
-            for (quote, _), r in zip(chunk, results, strict=False):
+            for (quote, coid), r in zip(chunk, results, strict=False):
                 if r.ok:
                     report.created += 1
                     log.info("placed %s %s", quote.ticker, quote)
                     if r.filled > 0:
                         log.warning("%s filled %s on placement", quote.ticker, r.filled)
+                    remaining = quote.size - r.filled
+                    if r.order_id and remaining > Decimal(0):
+                        report.placed.append(
+                            Order(
+                                r.order_id,
+                                coid,
+                                quote.ticker,
+                                quote.side,
+                                quote.price,
+                                remaining,
+                                "resting",
+                            )
+                        )
                 else:
                     # post-only rejections are expected when the book moves under us
                     report.rejected += 1

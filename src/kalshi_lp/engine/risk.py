@@ -73,6 +73,7 @@ class RiskManager:
         self._baseline: dict[str, Decimal] = {}
         self._last_pnl: dict[str, Decimal] = {}
         self._history: dict[str, deque[tuple[float, Decimal]]] = {}
+        self._reduce_only_reason = ""
 
     # ----------------------------------------------------------------- state
 
@@ -110,7 +111,8 @@ class RiskManager:
 
     def _track_fills(self, ticker: str, position: Decimal, now: float) -> None:
         history = self._history.setdefault(ticker, deque())
-        history.append((now, position))
+        if not history or history[-1][1] != position:
+            history.append((now, position))
         while history and now - history[0][0] > self.cfg.fill_burst_window_seconds:
             history.popleft()
         traded = sum(
@@ -134,12 +136,15 @@ class RiskManager:
         positions: Mapping[str, Position],
         marks: Mapping[str, Decimal | None],
         balance: Decimal,
+        live_positions: Mapping[str, Decimal] | None = None,
     ) -> RiskView:
+        """Recompute risk. ``live_positions`` (instant, from fills) drive the fill-burst breaker."""
         now = self._clock()
         session_pnl = ZERO
         for ticker in tickers:
             pos = positions.get(ticker, Position.flat(ticker))
-            self._track_fills(ticker, pos.position, now)
+            live = live_positions.get(ticker, pos.position) if live_positions else pos.position
+            self._track_fills(ticker, live, now)
             if ticker in positions:
                 self._last_pnl[ticker] = position_pnl(pos, marks.get(ticker))
             pnl = self._last_pnl.get(ticker, ZERO)
@@ -150,13 +155,19 @@ class RiskManager:
         if session_pnl <= -self.cfg.max_session_loss:
             self.halt(f"session loss {session_pnl:.2f} exceeds limit {self.cfg.max_session_loss}")
 
-        allow_increase = True
+        reasons = []
         if total_exposure >= self.cfg.max_total_exposure:
-            log.info("exposure %.2f at limit; reduce-only", total_exposure)
-            allow_increase = False
+            reasons.append(f"exposure ${total_exposure:.2f} at limit")
         if balance < self.cfg.min_balance:
-            log.info("balance %.2f below minimum; reduce-only", balance)
-            allow_increase = False
+            reasons.append(f"balance ${balance:.2f} below minimum")
+        reduce_only = "; ".join(reasons)
+        if reduce_only != self._reduce_only_reason:
+            if reduce_only:
+                log.warning("reduce-only: %s", reduce_only)
+            else:
+                log.info("reduce-only lifted")
+            self._reduce_only_reason = reduce_only
+        allow_increase = not reasons
 
         return RiskView(
             halted=self.halted,

@@ -59,24 +59,70 @@ def reference_price(bids: Sequence[Level], depth: Decimal) -> Decimal | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class OwnOrder:
+    """One of our resting orders on a side, for scoring."""
+
+    price: Decimal  # in the side's own terms
+    size: Decimal
+    ahead: Decimal | None = None  # others' contracts ahead of it at its price; None = back of queue
+
+
+def score_snapshot_side(
+    others: Sequence[Level],
+    own: Sequence[OwnOrder],
+    params: RewardParams,
+    grid: PriceGrid,
+) -> SideScore:
+    """Our share of one side's score for a snapshot, exactly as the program rules compute it.
+
+    ``others`` is the side's bid ladder (best first) excluding our orders.
+    ``own`` are our orders on this side, each placed in the price level's
+    time-priority queue behind ``ahead`` contracts from other traders.
+    Prices are in the side's own terms (NO prices for the NO side).
+    """
+    prices = sorted({lvl.price for lvl in others} | {o.price for o in own}, reverse=True)
+    others_at = {lvl.price: lvl.size for lvl in others}
+
+    # Build the full queue, best price first, time priority within a level.
+    entries: list[tuple[Decimal, Decimal, bool]] = []  # (price, size, is_ours)
+    for price in prices:
+        remaining_others = others_at.get(price, ZERO)
+        mine = sorted(
+            (o for o in own if o.price == price),
+            key=lambda o: remaining_others if o.ahead is None else o.ahead,
+        )
+        placed = ZERO
+        for order in mine:
+            ahead = remaining_others if order.ahead is None else min(order.ahead, remaining_others)
+            if ahead > placed:
+                entries.append((price, ahead - placed, False))
+                placed = ahead
+            entries.append((price, order.size, True))
+        if remaining_others > placed:
+            entries.append((price, remaining_others - placed, False))
+    return _score_entries(entries, params, grid)
+
+
 def score_side(
     others: Sequence[Level],
     our_price: Decimal,
     our_size: Decimal,
     params: RewardParams,
     grid: PriceGrid,
+    ahead: Decimal | None = None,
 ) -> SideScore:
-    """Estimate our share of one side's score if we add a bid at ``our_price``.
+    """Estimate our share if we rest one bid at ``our_price``.
 
-    ``others`` is the side's bid ladder (best first) with our own orders
-    removed. We assume our order joins the back of the queue at its price.
-    Prices are in that side's own terms (NO prices for the NO side).
+    By default the order joins the back of the queue at its price; pass
+    ``ahead`` for an existing order whose real queue position is known.
     """
-    # (price, size, is_ours), best price first, ours last within its level.
-    entries = [(lvl.price, lvl.size, False) for lvl in others if lvl.price >= our_price]
-    entries.append((our_price, our_size, True))
-    entries += [(lvl.price, lvl.size, False) for lvl in others if lvl.price < our_price]
+    return score_snapshot_side(others, [OwnOrder(our_price, our_size, ahead)], params, grid)
 
+
+def _score_entries(
+    entries: Sequence[tuple[Decimal, Decimal, bool]], params: RewardParams, grid: PriceGrid
+) -> SideScore:
     total_depth = sum((size for _, size, _ in entries), ZERO)
     ref = reference_price([Level(p, s) for p, s, _ in entries], params.reference_depth)
     if total_depth < params.target_size or ref is None:
@@ -100,13 +146,24 @@ def score_side(
     return SideScore(share, True, ref)
 
 
-def expected_daily_reward(yes: SideScore, no: SideScore, params: RewardParams) -> Decimal:
-    """Rough daily payout if the current book persisted all day.
-
-    Each snapshot's total score across participants is 2 (one per side), so
-    our fraction of the period is the average of our two side shares. A
-    snapshot where either side misses Target Size pays nobody.
-    """
+def snapshot_score(yes: SideScore, no: SideScore) -> Decimal:
+    """Our score for one snapshot (0..2). Zero if either side misses Target Size."""
     if not (yes.meets_target and no.meets_target):
         return ZERO
-    return params.reward_per_day * (yes.share + no.share) / 2
+    return yes.share + no.share
+
+
+def expected_daily_reward(yes: SideScore, no: SideScore, params: RewardParams) -> Decimal:
+    """Daily payout if this snapshot's book persisted all day.
+
+    Payout = (our summed snapshot scores / everyone's summed scores) x reward x
+    (eligible snapshots / all snapshots). Every eligible snapshot hands out a
+    total score of 2 (a full share per side), so each one-second snapshot
+    pays us ``score / 2`` of that second's slice of the reward.
+    """
+    return params.reward_per_day * snapshot_score(yes, no) / 2
+
+
+def earned_per_snapshot(score: Decimal, params: RewardParams) -> Decimal:
+    """Dollars one snapshot (one second) with this score earns."""
+    return params.reward_per_day / 86_400 * score / 2

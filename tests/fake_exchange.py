@@ -17,6 +17,7 @@ from kalshi_lp.exchange.models import (
     Order,
     Position,
 )
+from kalshi_lp.feed.state import MarketState
 
 
 class FakeExchange:
@@ -134,3 +135,40 @@ class FakeExchange:
                 o.remaining - count,
                 o.status,
             )
+
+
+class FakeFeed:
+    """A perfectly synced stand-in for :class:`StreamingFeed` over a :class:`FakeExchange`.
+
+    Call :meth:`sync` to deliver what the WebSocket would have delivered:
+    books (including our orders), our resting orders, and positions.
+    """
+
+    def __init__(self, exchange: FakeExchange, prefix: str = "klp"):
+        self.exchange = exchange
+        self.state = MarketState(prefix)
+        self.tickers: set[str] = set()
+        self.connected = True
+
+    async def start(self, tickers) -> None:
+        self.tickers = set(tickers)
+        self.sync()
+
+    async def stop(self) -> None:
+        pass
+
+    async def set_tickers(self, tickers) -> None:
+        self.tickers = set(tickers)
+        self.sync()
+
+    def sync(self) -> None:
+        for ticker in self.tickers:
+            if ticker in self.exchange.books:
+                book = self.exchange._book_with_orders(ticker)
+                self.state.set_snapshot(
+                    ticker,
+                    [(lvl.price, lvl.size) for lvl in book.yes],
+                    [(lvl.price, lvl.size) for lvl in book.no],
+                )
+        self.state.replace_orders(self.exchange.orders.values())
+        self.state.replace_positions(self.exchange.positions)
