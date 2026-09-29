@@ -225,3 +225,6 @@ secrets/
 # Bot runtime output
 logs/
 runs/
+
+# The Python template ignores every lib/ dir; the dashboard source needs its lib/
+!dashboard/src/lib/

@@ -4,8 +4,14 @@
     python dashboard/server.py                 # http://127.0.0.1:8050
     python dashboard/server.py --runs runs --port 8050
 
-Reads the run journals the bot writes (``runs/<run_id>/events.jsonl`` and
-``state.json``) and serves them to ``index.html``, which polls for updates.
+Serves two things:
+
+* The journal API below. It reads the run journals the bot writes
+  (``runs/<run_id>/events.jsonl`` and ``state.json``).
+* The built React app from ``dashboard/dist`` (``npm run build``). In
+  development, run ``npm run dev`` instead: Vite serves the app with hot
+  reload and proxies ``/api`` here.
+
 Binds to localhost only: the journal shows your positions and orders.
 
 API
@@ -19,6 +25,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import mimetypes
 import re
 import time
 from http import HTTPStatus
@@ -32,8 +39,16 @@ MAX_CHUNK = 2_000_000  # bytes of events per response
 RUNNING_WITHIN = 5.0  # seconds since last state write to count as running
 
 
+NOT_BUILT = b"""<!doctype html><title>KLP Terminal</title>
+<body style="background:#000;color:#ffa200;font:14px monospace;padding:20px">
+<p>The dashboard app isn't built yet. Run:</p>
+<pre>cd dashboard &amp;&amp; npm install &amp;&amp; npm run build</pre>
+<p>or use <code>make dashboard</code>, or <code>npm run dev</code> for hot reload.</p></body>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     runs_dir: Path = Path("runs")
+    static_dir: Path = HERE / "dist"
 
     def log_message(self, fmt: str, *args: object) -> None:  # keep the terminal quiet
         pass
@@ -58,9 +73,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlsplit(self.path)
         parts = [p for p in url.path.split("/") if p]
-        if not parts:
-            page = (HERE / "index.html").read_bytes()
-            self._send(HTTPStatus.OK, page, "text/html; charset=utf-8")
+        if parts[:1] != ["api"]:
+            self.send_static(parts)
         elif parts == ["api", "runs"]:
             self._json(self.list_runs())
         elif len(parts) == 4 and parts[:2] == ["api", "runs"]:
@@ -76,6 +90,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def send_static(self, parts: list[str]) -> None:
+        root = self.static_dir.resolve()
+        index = root / "index.html"
+        if not index.exists():
+            self._send(HTTPStatus.OK, NOT_BUILT, "text/html; charset=utf-8")
+            return
+        path = (root / "/".join(parts)).resolve() if parts else index
+        if not path.is_relative_to(root):  # no escaping the build directory
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        if not path.is_file():
+            path = index  # single-page app: unknown paths get the app
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type == "application/javascript":
+            content_type += "; charset=utf-8"
+        self._send(HTTPStatus.OK, path.read_bytes(), content_type)
 
     def list_runs(self) -> list[dict[str, object]]:
         runs = []

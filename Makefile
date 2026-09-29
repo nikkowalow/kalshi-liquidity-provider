@@ -2,7 +2,7 @@ PYTHON ?= python3
 VENV   := .venv
 BIN    := $(VENV)/bin
 
-.PHONY: install test lint typecheck fmt check markets rewards dashboard demo demo-live status cancel clean
+.PHONY: install test lint typecheck fmt check markets rewards dashboard dashboard-dev dashboard-api demo demo-live status cancel clean
 
 install:            ## create venv and install with dev deps
 	$(PYTHON) -m venv $(VENV)
@@ -32,7 +32,14 @@ markets:            ## preview demo market selection
 rewards:            ## estimate $/day from live production incentive programs (no key needed)
 	$(BIN)/klp rewards -c config/prod.yaml
 
-dashboard:          ## live dashboard for bot runs: http://127.0.0.1:8050
+dashboard:          ## build the React dashboard and serve it: http://127.0.0.1:8050
+	cd dashboard && npm install --silent && npm run build
+	$(BIN)/python dashboard/server.py --runs runs --port 8050
+
+dashboard-dev:      ## hot-reload UI dev: run `make dashboard-api` too, open http://localhost:5173
+	cd dashboard && npm install --silent && npm run dev
+
+dashboard-api:      ## journal API only (for dashboard-dev)
 	$(BIN)/python dashboard/server.py --runs runs --port 8050
 
 demo:               ## run against demo, dry-run

@@ -1,5 +1,6 @@
 """Run journal and dashboard server."""
 
+import http.client
 import json
 import logging
 import threading
@@ -77,10 +78,17 @@ async def test_bot_journals_orders_quotes_and_snapshot(tmp_path) -> None:
 
 @pytest.fixture
 def dashboard(tmp_path):
-    Handler.runs_dir = tmp_path
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    Handler.runs_dir = runs
+    static = tmp_path / "dist"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text("<title>KLP Terminal</title>")
+    (static / "assets" / "app.js").write_text("console.log(1)")
+    Handler.static_dir = static
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield tmp_path, f"http://127.0.0.1:{server.server_address[1]}"
+    yield runs, f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
 
 
@@ -97,7 +105,9 @@ def test_dashboard_serves_runs_state_and_incremental_events(dashboard) -> None:
     j = RunJournal(root, "demo", "dry")
     j.write_state({"status": "running"})
     j.event("order", action="place")
-    assert b"KLP Terminal" in get(base + "/")  # serves terminal.html, not the Vite index
+    assert b"KLP Terminal" in get(base + "/")  # the built React app
+    assert get(base + "/assets/app.js") == b"console.log(1)"
+    assert b"KLP Terminal" in get(base + "/some/client/route")  # SPA fallback
     [run] = get(base + "/api/runs")
     assert run["id"] == j.run_id and run["status"] == "running"
     assert get(f"{base}/api/runs/{j.run_id}/state")["status"] == "running"
@@ -114,3 +124,10 @@ def test_dashboard_rejects_path_traversal(dashboard) -> None:
     with pytest.raises(urllib.error.HTTPError) as err:
         get(base + "/api/runs/..%2F..%2Fetc/state")
     assert err.value.code == 404
+    # Static files can't escape the build directory either: never serve a file outside dist.
+    host, port = base.removeprefix("http://").split(":")
+    conn = http.client.HTTPConnection(host, int(port))
+    conn.request("GET", "/assets/../../../pyproject.toml")  # sent verbatim, not normalized
+    resp = conn.getresponse()
+    assert resp.status == 404 and b"[project]" not in resp.read()
+    assert b"[project]" not in get(base + "/assets/..%2F..%2F..%2Fpyproject.toml")

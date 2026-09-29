@@ -14,7 +14,7 @@ loop:                          # quoting is event-driven off the WebSocket feed
   requote_min_interval_seconds: 0.25   # debounce per requote
   heartbeat_seconds: 5                 # requote everything at least this often
   reconcile_interval_seconds: 15       # REST cross-check of orders/positions/balance
-  queue_refresh_seconds: 10            # our queue positions, for reward tracking
+  queue_refresh_seconds: 3 # our queue positions (rank in book, reward tracking)
   reward_report_seconds: 60            # log estimated rewards earned
   reselect_interval_seconds: 600
   status_check_interval_seconds: 30

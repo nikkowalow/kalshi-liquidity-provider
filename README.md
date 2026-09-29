@@ -104,8 +104,12 @@ shrunk, or rejected, fills, quote changes, market selections, and every log line
 `state.json` (a full snapshot, rewritten every second). The dashboard reads the journal live:
 
 ```bash
-make dashboard          # then open http://127.0.0.1:8050   (in a second terminal from the bot)
+make dashboard          # builds the React app, serves it + the journal API on http://127.0.0.1:8050
 ```
+
+The UI is a React + TypeScript app built with Vite, in `dashboard/src`. To work on it with hot
+reload, run `make dashboard-api` in one terminal and `make dashboard-dev` in another, then open
+http://localhost:5173 (Vite proxies `/api` to the Python server).
 
 It shows status and KPIs (balance, capital vs. budget, session P&L, estimated rewards and rate);
 per-market book, quotes, position, program, reward share, and earnings; charts of rewards, P&L,
@@ -163,7 +167,7 @@ src/kalshi_lp/
     ├── reward_tracker.py  #   live per-second reward scoring
     └── bot.py             #   quoting / maintenance / reward loops
 config/                    # demo.yaml, prod.yaml
-dashboard/                 # live dashboard: stdlib server.py + terminal.html
+dashboard/                 # live dashboard: React/Vite app (src/) + stdlib API server.py
 tests/                     # unit, WebSocket (local server), end-to-end against a fake exchange
 ```
 

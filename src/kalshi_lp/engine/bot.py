@@ -38,6 +38,7 @@ from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.types import ZERO, Leg, Quote
 from kalshi_lp.engine import budget
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
+from kalshi_lp.engine.queue import queue_report
 from kalshi_lp.engine.reconciler import Plan, reconcile
 from kalshi_lp.engine.reward_tracker import RewardTracker, own_orders_by_leg, strip_own
 from kalshi_lp.engine.risk import Mark, RiskManager, RiskView
@@ -389,6 +390,7 @@ class LiquidityBot:
             if decisions is None:
                 plan.cancels += own
                 self._desired.pop(ticker, None)
+                self._decisions.pop(ticker, None)  # dashboard: no stale quotes on paused markets
                 continue
             quotes = [d.quote for d in decisions.values() if d.quote]
             self._note_quotes(ticker, decisions, quotes)
@@ -704,8 +706,29 @@ class LiquidityBot:
                 "resting_orders": len(self.state.our_orders()),
             },
             "markets": markets,
-            "orders": [_order_json(o) for o in self.state.our_orders()],
+            "orders": self._orders_with_queue(),
         }
+
+    def _orders_with_queue(self) -> list[dict[str, Any]]:
+        """Resting orders plus their rank in the book (see :mod:`engine.queue`)."""
+        rows = []
+        stripped: dict[str, Orderbook | None] = {}
+        for order in self.state.our_orders():
+            book = self.state.book(order.ticker)
+            if order.ticker not in stripped:
+                own = own_orders_by_leg(self.state.our_orders(order.ticker), self.state.queue_ahead)
+                stripped[order.ticker] = strip_own(book, own) if book else None
+            report = queue_report(
+                order,
+                book,
+                stripped[order.ticker],
+                self.state.queue_ahead,
+                self.rewards.get(order.ticker),
+            )
+            rows.append(
+                {**_order_json(order), **report, "age": self.state.order_age(order.order_id)}
+            )
+        return rows
 
     # ----------------------------------------------------------------- rewards
 
