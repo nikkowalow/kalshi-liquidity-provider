@@ -5,8 +5,8 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
   server: {
-    // index.html (the terminal) reads live data from the Python journal server:
-    //   python dashboard/server.py   (or: make dashboard)
-    proxy: { '/api': 'http://127.0.0.1:8050' },
+    // Live data comes from the running bot's API (klp run serves it on :8050),
+    // including the /api/ws WebSocket.
+    proxy: { '/api': { target: 'http://127.0.0.1:8050', ws: true } },
   },
 })

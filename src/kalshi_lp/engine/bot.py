@@ -147,6 +147,8 @@ class LiquidityBot:
         self._last_exit: dict[str, float] = {}  # ticker -> monotonic time of the last exit order
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
+        self._rescan_requested = False  # re-rank at once (from the dashboard)
+        self.held_since: float | None = None  # paused from the dashboard (wall time), until resumed
         self._selected: dict[str, Candidate] = {}  # latest selection details per market
         self._last_reselect = float("-inf")
         self._lock = asyncio.Lock()
@@ -186,6 +188,8 @@ class LiquidityBot:
             api_url=s.api_url,
             config=s.model_dump(mode="json"),
         )
+        # Start-up (waiting for the exchange, the first market scan) can take a minute.
+        self.journal.write_state(self.snapshot(status="starting"))
         try:
             await self.startup()
             if self.stopping:
@@ -195,6 +199,8 @@ class LiquidityBot:
                 asyncio.create_task(self._reward_loop(), name="rewards"),
                 asyncio.create_task(self._journal_loop(), name="journal"),
             ]
+            for task in tasks:
+                task.add_done_callback(_report_crash)
             await self._quote_loop(max_requotes)
         finally:
             for task in tasks:
@@ -255,6 +261,7 @@ class LiquidityBot:
         if orphans:
             log.warning("found %d resting orders from a previous run; cancelling", len(orphans))
             await self._pull(orphans, "left over from a previous run")
+        await self.flatten_all()  # e.g. a halt or crash that left a position open
 
         if not s.dry_run and s.risk.order_group_contracts_limit > 0:
             group = await self.client.create_order_group(s.risk.order_group_contracts_limit)
@@ -302,6 +309,10 @@ class LiquidityBot:
                         "once the exchange is reachable.",
                         exc2,
                     )
+        try:
+            await self.flatten_all()
+        except TRANSIENT_ERRORS as exc:
+            log.critical("could not close positions before stopping (%s): check Kalshi", exc)
         group = self.executor.order_group_id
         if group:
             try:
@@ -561,6 +572,8 @@ class LiquidityBot:
         book = self.state.book(ticker)
         if market is None:
             return "market no longer selected"
+        if self.held_since is not None:
+            return "paused from the dashboard"
         if not self.feed.connected:
             return "market data feed disconnected"
         if book is None:
@@ -616,29 +629,92 @@ class LiquidityBot:
         now = time.monotonic()
         if now - self._last_exit.get(ticker, float("-inf")) < risk.flatten_retry_seconds:
             return True  # an exit just went out; wait for its fills to arrive
-        book = self.state.book(ticker)
-        market = self.markets.get(ticker)
-        grid = market.grid if market else None
+        if self._add_exit(plan, ticker, position, self.state.book(ticker), risk.flatten_slippage):
+            self._last_exit[ticker] = now
+        return True
+
+    def _add_exit(
+        self,
+        plan: Plan,
+        ticker: str,
+        position: Decimal,
+        book: Orderbook | None,
+        slippage: Decimal,
+        why: str = "flatten",
+    ) -> bool:
+        """Add an immediate-or-cancel order closing ``position`` against ``book``."""
+        market = self.markets.get(ticker) or (
+            self._selected[ticker].market if ticker in self._selected else None
+        )
         if position > 0:  # long YES: sell into the best YES bid
             best = book.best_yes_bid if book else None
-            price = None if best is None else max(best - risk.flatten_slippage, Decimal("0.01"))
+            price = None if best is None else max(best - slippage, Decimal("0.01"))
             side = Side.ASK
         else:  # long NO: buy YES from the best YES ask
             best = book.best_yes_ask if book else None
-            price = None if best is None else min(best + risk.flatten_slippage, Decimal("0.99"))
+            price = None if best is None else min(best + slippage, Decimal("0.99"))
             side = Side.BID
         if price is None:
             log.warning("%s: can't flatten %s, no price on the other side", ticker, position)
-            return True
-        if grid is not None:
-            price = grid.round_down(price) if side is Side.ASK else grid.round_up(price)
-        quote = Quote(ticker, side, price, abs(position))
-        plan.exits.append(quote)
+            return False
+        if market is not None:
+            price = (
+                market.grid.round_down(price) if side is Side.ASK else market.grid.round_up(price)
+            )
+        plan.exits.append(Quote(ticker, side, price, abs(position)))
         plan.why[(ticker, side, price)] = (
-            f"flatten {position:+f} filled contracts (best {best}, limit {price})"
+            f"{why} {position:+f} filled contracts (best {best}, limit {price})"
         )
-        self._last_exit[ticker] = now
         return True
+
+    async def flatten_all(
+        self, attempts: int = 6, *, force: bool = False
+    ) -> tuple[int, dict[str, Decimal]]:
+        """Close every position in markets this bot traded, retrying (on start-up and stop).
+
+        A halt or a stop must not leave a position unmanaged: an exit that finds
+        no one on the other side is retried with the latest book, reaching one
+        slippage step further each time. Runs only with ``flatten_on_fill``,
+        unless ``force`` (the dashboard's button). Returns how many positions
+        were open and the ones still open at the end.
+        """
+        risk = self.settings.risk
+        if not (risk.flatten_on_fill or force) or self.settings.dry_run:
+            return 0, {}
+        # Markets the bot has quoted: now, this session, or in earlier sessions (the ledger).
+        ours = set(self.markets) | set(self._selected) | set(self.tracker.stats)
+        open_: dict[str, Decimal] = {}
+        found = 0
+        for attempt in range(attempts):
+            positions = await self.client.get_positions()
+            open_ = {t: p.position for t, p in positions.items() if p.position != 0 and t in ours}
+            if not attempt:
+                found = len(open_)
+            if not open_:
+                if attempt:
+                    log.info("all positions closed")
+                return found, {}
+            books = await self.client.get_orderbooks(sorted(open_))
+            plan = Plan()
+            slippage = risk.flatten_slippage * (attempt + 1)
+            for ticker, position in open_.items():
+                self._add_exit(
+                    plan, ticker, position, books.get(ticker), slippage, "close leftover"
+                )
+            if plan:
+                log.warning(
+                    "closing %d leftover position(s) (attempt %d)",
+                    len(open_),
+                    attempt + 1,
+                )
+                self._apply(await self.executor.execute(plan), plan)
+            await asyncio.sleep(1.0)
+        log.critical(
+            "COULD NOT CLOSE POSITIONS: %s. Close them on Kalshi, or restart the bot "
+            "(it retries on start-up).",
+            ", ".join(f"{t} {p:+f}" for t, p in open_.items()),
+        )
+        return found, open_
 
     def _auto_sizes(self) -> dict[str, Decimal]:
         """Per-market size that puts the capital budget to work (quoting.auto_size)."""
@@ -834,21 +910,35 @@ class LiquidityBot:
             await self._sleep(1.0)
             now = time.monotonic()
             gap = self.settings.loop.min_reselect_gap_seconds
-            if self._reselect_soon and now - self._last_reselect >= gap:
-                self._reselect_soon = False
+            asked = self._rescan_requested
+            if asked or (self._reselect_soon and now - self._last_reselect >= gap):
+                self._rescan_requested = self._reselect_soon = False
                 last[self._reselect_job] = now  # counts as the scheduled one too
-                log.info("a market was paused; re-ranking early to use its slot")
-                try:
-                    await self._reselect_job()
-                except TRANSIENT_ERRORS as exc:
-                    log.warning("reselect failed: %s", exc)
+                log.info(
+                    "re-ranking markets now (asked from the dashboard)"
+                    if asked
+                    else "a market was paused; re-ranking early to use its slot"
+                )
+                await self._run_job(self._reselect_job)
             for interval, job in jobs:
                 if now - last[job] >= interval:
                     last[job] = now
-                    try:
-                        await job()
-                    except TRANSIENT_ERRORS as exc:
-                        log.warning("%s failed: %s", job.__name__.strip("_"), exc)
+                    await self._run_job(job)
+
+    async def _run_job(self, job: Callable[[], Awaitable[None]]) -> None:
+        """Run one maintenance job; a failure is logged and the loop carries on.
+
+        An unexpected error (a bug, an odd API response) must not end the loop:
+        that would silently stop every market scan, REST cross-check and
+        exchange-status check for the rest of the run.
+        """
+        name = job.__name__.strip("_")
+        try:
+            await job()
+        except TRANSIENT_ERRORS as exc:
+            log.warning("%s failed: %s", name, exc)
+        except Exception:
+            log.exception("%s crashed; it runs again at its next interval", name)
 
     async def _check_status(self) -> None:
         status = await self.client.get_exchange_status()
@@ -882,6 +972,51 @@ class LiquidityBot:
         if self.tracker.stats:
             for line in self.tracker.report_lines():
                 log.info(line)
+
+    # ---------------------------------------------------------------- controls
+    # What the dashboard's buttons do (kalshi_lp.api -> engine.controls).
+
+    async def hold(self) -> int:
+        """Stop quoting until :meth:`release`: cancel every bot order now; returns how many.
+
+        Positions still get closed (flatten_on_fill runs before the pause check).
+        """
+        if self.held_since is None:
+            self.held_since = time.time()
+        async with self._lock:
+            orders = self.state.our_orders()
+            await self._pull(orders, "paused from the dashboard")
+        return len(orders)
+
+    def release(self) -> None:
+        """Quote again after :meth:`hold`, starting now."""
+        self.held_since = None
+        self.state.mark_dirty(self.markets)
+
+    def request_rescan(self) -> None:
+        """Re-rank markets within a second (the maintenance loop runs it)."""
+        self._rescan_requested = True
+
+    async def close_positions(self) -> tuple[int, dict[str, Decimal]]:
+        """Close every position now, whatever flatten_on_fill says. See :meth:`flatten_all`."""
+        async with self._lock:  # no quoting (or its own exits) in between
+            return await self.flatten_all(force=True)
+
+    def set_max_capital(self, value: Decimal) -> Decimal | None:
+        """Change the capital budget until the bot restarts; returns the old one.
+
+        Re-ranks at once (the budget decides how many markets get funded) and
+        resizes every market's quotes on the next requote.
+        """
+        old = self.settings.risk.max_capital
+        risk = self.settings.risk.model_copy(update={"max_capital": value})
+        self.settings = self.settings.model_copy(update={"risk": risk})
+        self.selector.max_capital = value
+        self._config_json = self.settings.model_dump(mode="json")
+        self._budget_binding = False
+        self.request_rescan()
+        self.state.mark_dirty(self.markets)
+        return old
 
     # ----------------------------------------------------------------- journal
 
@@ -987,6 +1122,7 @@ class LiquidityBot:
             "ws_connected": self.feed.connected,
             "trading_active": self.trading_active,
             "globally_paused": self.risk.globally_paused,
+            "held_since": self.held_since,  # paused from the dashboard
             "halt_reason": self.risk.halt_reason,
             "budget_binding": self._budget_binding,
             "totals": {
@@ -1065,6 +1201,12 @@ class LiquidityBot:
                     params,
                     market.grid,
                 )
+
+
+def _report_crash(task: asyncio.Task[None]) -> None:
+    """Say so at once when a background loop dies (otherwise it only surfaces at shutdown)."""
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        log.critical("the %s loop crashed and stopped: %r", task.get_name(), exc, exc_info=exc)
 
 
 def _leg_json(d: LegDecision) -> dict[str, Any]:

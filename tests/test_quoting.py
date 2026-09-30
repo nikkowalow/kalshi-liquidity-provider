@@ -201,3 +201,23 @@ def test_cushion_never_exceeds_full_credit_depth(quoting_cfg) -> None:
     d = quote(cfg, small, book)
     assert d[Leg.YES].quote.price == D("0.39")  # 70 ahead >= 60; not pushed down to 0.38
     assert d[Leg.YES].score.share > 0
+
+
+def test_loss_cap_limits_what_one_fill_can_lose(quoting_cfg, reward) -> None:
+    # YES bid at 0.40: a fill loses at most 0.40/contract, so $2 allows 5 contracts.
+    # NO bid at 0.50 (the YES ask): at most 0.50/contract, so 4.
+    cfg = quoting_cfg.model_copy(update={"max_loss_per_fill": D(2)})
+    d = quote(cfg, reward, WIDE)
+    yes, no = d[Leg.YES].quote, d[Leg.NO].quote
+    assert yes is not None and no is not None
+    assert (yes.price, yes.size) == (D("0.40"), D(5))
+    assert (no.price, no.size) == (D("0.50"), D(4))
+    tiny = quoting_cfg.model_copy(update={"max_loss_per_fill": D("0.2")})
+    assert quote(tiny, reward, WIDE)[Leg.YES].reason == "loss cap"  # not even one contract
+
+
+def test_loss_cap_doesnt_limit_buying_back_a_short(quoting_cfg, reward) -> None:
+    cfg = quoting_cfg.model_copy(update={"max_loss_per_fill": D(2)})
+    d = quote(cfg, reward, WIDE, position=-10)  # short YES: the YES bid reduces it
+    yes = d[Leg.YES].quote
+    assert yes is not None and yes.size == D(10)

@@ -353,3 +353,11 @@ async def test_program_list_is_cached_between_scans() -> None:
     assert ex.program_calls == 1
     await selector(ex, mode="incentives", catalog_refresh_seconds=0).select()
     assert ex.program_calls == 2
+
+
+async def test_excluded_series_are_never_picked() -> None:
+    tickers = ["KXBIGGESTQUAKE-30SEP26-5.6", "KXCALM-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program(tickers[0], 500), program(tickers[1], 100)]
+    picked = await selector(ex, mode="incentives", exclude_series=["KXBIGGESTQUAKE"]).select()
+    assert [c.ticker for c in picked] == ["KXCALM-1"]

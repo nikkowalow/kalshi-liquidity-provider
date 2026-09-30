@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { duration } from "../lib/format";
-import type { RunInfo, RunState } from "../types";
+import type { RunState } from "../types";
+import type { Link } from "../lib/useJournal";
 import { MULTIPLIER_PRESETS } from "../lib/useMultiplier";
 import { Flash } from "./Flash";
 import { Stamp } from "./Stamp";
@@ -28,29 +29,23 @@ function useClock(): number {
 }
 
 interface TopBarProps {
-  runs: RunInfo[];
   runId: string | null;
-  onChooseRun: (id: string) => void;
-  follow: boolean;
-  onFollow: (follow: boolean) => void;
+  link: Link;
   state: RunState | null;
-  serverUp: boolean;
   multiplier: number;
   onMultiplier: (n: number) => void;
   rewardFactor: number;
+  controls?: ReactNode; // the bot's buttons (<Controls>)
 }
 
 export function TopBar({
-  runs,
   runId,
-  onChooseRun,
-  follow,
-  onFollow,
+  link,
   state,
-  serverUp,
   multiplier,
   onMultiplier,
   rewardFactor,
+  controls,
 }: TopBarProps) {
   const now = useClock();
   const status = effectiveStatus(state);
@@ -64,31 +59,19 @@ export function TopBar({
   return (
     <div className="bar">
       <span className="brand">KLP &lt;GO&gt;</span>
-      <select value={runId ?? ""} onChange={(e) => onChooseRun(e.target.value)}>
-        {runs.length === 0 && (
-          <option value="">no runs yet — start the bot</option>
-        )}
-        {runs.map((r) => (
-          <option key={r.id} value={r.id}>
-            {r.id} [{r.status}]
-          </option>
-        ))}
-      </select>
-      <label data-help="bar:follow">
-        <input
-          type="checkbox"
-          checked={follow}
-          onChange={(e) => onFollow(e.target.checked)}
-        />{" "}
-        follow latest
-      </label>
+      <span data-help="bar:run">{runId ?? "—"}</span>
+      {link !== "live" && (
+        <span className="badge halted" data-help="bar:link">
+          ● {link === "connecting" ? "connecting to bot…" : "bot offline · reconnecting"}
+        </span>
+      )}
       <span className={`badge ${status}`} data-help="bar:status">
         <Flash value={state?.updated_at ?? null}>
           <span className={status === "running" ? "pulse" : undefined}>●</span>
         </Flash>{" "}
         {status}
       </span>
-      {status === "running" && (
+      {status === "running" && link === "live" && (
         <span className="rx" data-help="bar:rx">
           <span className="spin" />
           <Flash value={state?.updated_at ?? null}>
@@ -101,9 +84,8 @@ export function TopBar({
         {state?.mode ?? "—"}
       </span>
       {state && <span>ENV {state.environment}</span>}
-      {!serverUp && (
-        <span className="badge halted">● dashboard server unreachable</span>
-      )}
+      {controls}
+      <span className="spacer" />
       <label className="mult" data-help="bar:multiplier">
         C ×
         <input
@@ -128,7 +110,6 @@ export function TopBar({
           </button>
         </span>
       )}
-      <span className="spacer" />
       {state?.session != null && (
         <span data-help="bar:session">
           SESSION {state.session}

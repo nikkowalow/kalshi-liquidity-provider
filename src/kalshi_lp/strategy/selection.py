@@ -176,6 +176,8 @@ class MarketSelector:
             return False
         if market.ticker in self.cfg.exclude_tickers or market.ticker in self._exclude:
             return False
+        if series_of(market.ticker) in self.cfg.exclude_series:
+            return False
         to_close = market.seconds_to_close()
         return to_close is None or to_close >= self.cfg.min_seconds_to_close
 

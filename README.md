@@ -110,21 +110,68 @@ and the markets it was in carry over, so the dashboard shows one continuous hist
 `klp run --journal NAME` to start a separate history instead. Journals from older versions (one
 directory per run) are imported the first time and moved to `runs/_imported/`.
 
-The dashboard reads the journal live:
+While it runs, the bot serves the dashboard and an API on http://127.0.0.1:8050 (`api:` in
+the config: `port`, `host`, `enabled`). The dashboard doesn't read the journal files: it holds a
+WebSocket open to the bot, which greets it with the latest snapshot, recent events and the totals
+history, then pushes every order, fill, log line and snapshot the moment they happen. While the
+bot is stopped the page keeps what it last had and reconnects on its own.
 
 ```bash
-make dashboard          # builds the React app, serves it + the journal API on http://127.0.0.1:8050
+make dashboard          # build the React app once (and after UI changes); then open :8050
+curl -s localhost:8050/api | jq               # the endpoint list
+curl -s localhost:8050/api/markets | jq '.[] | {ticker, earned, rate_per_hour}'
+curl -s 'localhost:8050/api/events?type=fill&limit=20' | jq
 ```
 
+| Endpoint | What |
+|---|---|
+| `GET /api/health` | status, session, exchange feed, connected dashboards |
+| `GET /api/state` | the latest snapshot: totals, markets, resting orders, config |
+| `GET /api/markets`, `/api/orders` | parts of the snapshot |
+| `GET /api/events?type=&limit=` | recent journal events, oldest first |
+| `GET /api/metrics?points=` | totals history, evenly thinned |
+| `GET /api/ws` | WebSocket: `hello`, then `events` and `state` messages (see `src/kalshi_lp/api.py`) |
+| `POST /api/control/<action>` | the dashboard's buttons (below); needs the token |
+
+**Controls.** The top bar has the bot's buttons:
+
+| Button | What it does |
+|---|---|
+| pause / resume | cancel every bot order and quote nothing until resume (positions still get closed) |
+| rescan | re-rank markets now instead of at the next scheduled scan |
+| flatten | close every position in the bot's markets now (IOC orders across the book) |
+| budget | change `risk.max_capital` until restart; re-ranks and resizes at once |
+| stop | shut down as Ctrl-C would: cancel orders, close positions, exit |
+
+Pause, flatten and stop take two clicks (the first arms the button for 4 seconds). The same
+actions work from scripts with the token the bot writes to `runs/<journal>/api-token`
+(owner-only, new each start):
+
+```bash
+TOKEN=$(cat runs/prod-live/api-token)
+curl -X POST -H "Authorization: Bearer $TOKEN" localhost:8050/api/control/pause
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"max_capital": 100}' localhost:8050/api/control/budget
+```
+
+A pause or budget change lasts until the bot restarts (edit the config to keep a budget). Set
+`api.controls: false` to switch the buttons off.
+
+The API listens on localhost and refuses requests from other web sites (`Origin`) and other host
+names (`Host`), so a page you visit can't read your positions or press the buttons; the
+buttons also need the token. It runs
+in the bot's event loop but can't slow trading: a dashboard that falls behind is disconnected
+(it reconnects), and if the port is taken the bot logs a warning and trades on without it. Run
+a second bot (say, demo next to prod) with a different `api.port`.
+
 The UI is a React + TypeScript app built with Vite, in `dashboard/src`. To work on it with hot
-reload, run `make dashboard-api` in one terminal and `make dashboard-dev` in another, then open
-http://localhost:5173 (Vite proxies `/api` to the Python server).
+reload, run the bot and `make dashboard-dev`, then open http://localhost:5173 (Vite proxies
+`/api`, WebSocket included, to the bot).
 
 It shows status and KPIs (balance, capital vs. budget, session P&L, estimated rewards and rate);
 per-market book, quotes, position, program, reward share, and earnings; charts of rewards, P&L,
 and capital over time; a filterable blotter; resting orders and fills; the log; market-selection
-history; and the run's config. *Follow latest* shows the most recently updated journal, and
-the others (prod-live, demo-dry, ...) stay selectable. The server is standard-library only and listens on localhost only.
+history; and the run's config.
 
 ## Going to production
 
@@ -146,9 +193,10 @@ and a verified SSN is needed above IRS reporting thresholds. See Kalshi's rules 
 
 ```
 src/kalshi_lp/
+├── api.py                 # dashboard API served by `klp run`: HTTP + live WebSocket
 ├── cli.py                 # `klp`: check / markets / rewards / status / run / cancel
 ├── config.py              # typed settings (YAML + env credentials)
-├── journal.py             # per-run event log + state snapshot for the dashboard
+├── journal.py             # persistent event log + state snapshot; publishes to the API
 ├── log.py
 ├── core/                  # exchange-agnostic domain types
 │   ├── types.py           #   Side, Leg, Quote, Decimal formatting
@@ -174,9 +222,10 @@ src/kalshi_lp/
     ├── executor.py        #   batched cancels / decreases / creates, dry-run
     ├── risk.py            #   limits, breakers, kill switch
     ├── reward_tracker.py  #   live per-second reward scoring
+    ├── controls.py        #   the dashboard's buttons: pause, flatten, budget, stop, ...
     └── bot.py             #   quoting / maintenance / reward loops
 config/                    # demo.yaml, prod.yaml
-dashboard/                 # live dashboard: React/Vite app (src/) + stdlib API server.py
+dashboard/                 # live dashboard: React/Vite app (src/), served by the bot
 tests/                     # unit, WebSocket (local server), end-to-end against a fake exchange
 ```
 

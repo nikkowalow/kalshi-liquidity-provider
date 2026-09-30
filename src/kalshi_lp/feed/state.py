@@ -88,6 +88,11 @@ class MarketState:
         self.dirty.add(ticker)
         self.changed.set()
 
+    def mark_dirty(self, tickers: Iterable[str]) -> None:
+        """Have the quoting loop requote ``tickers`` now, though nothing changed in them."""
+        self.dirty.update(tickers)
+        self.changed.set()
+
     def take_dirty(self) -> set[str]:
         dirty, self.dirty = self.dirty, set()
         self.changed.clear()

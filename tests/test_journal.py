@@ -1,17 +1,12 @@
-"""Run journal and dashboard server."""
+"""Run journal."""
 
-import http.client
 import json
 import logging
 import os
-import threading
 import time
-import urllib.request
 from decimal import Decimal
-from http.server import ThreadingHTTPServer
 
 import pytest
-from dashboard.server import Handler
 
 from kalshi_lp.journal import JournalLogHandler, RunJournal
 from tests.factories import make_book, make_market
@@ -85,61 +80,17 @@ async def test_bot_journals_orders_quotes_and_snapshot(tmp_path) -> None:
     json.dumps(snap, default=str)  # serialisable
 
 
-@pytest.fixture
-def dashboard(tmp_path):
-    runs = tmp_path / "runs"
-    runs.mkdir()
-    Handler.runs_dir = runs
-    static = tmp_path / "dist"
-    (static / "assets").mkdir(parents=True)
-    (static / "index.html").write_text("<title>KLP Terminal</title>")
-    (static / "assets" / "app.js").write_text("console.log(1)")
-    Handler.static_dir = static
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield runs, f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
-
-
-def get(url: str):
-    with urllib.request.urlopen(url) as r:
-        body = r.read()
-        return (
-            json.loads(body) if r.headers["Content-Type"].startswith("application/json") else body
-        )
-
-
-def test_dashboard_serves_runs_state_and_incremental_events(dashboard) -> None:
-    root, base = dashboard
-    j = RunJournal(root, "demo", "dry")
+def test_journal_publishes_events_and_snapshots_to_subscribers(tmp_path) -> None:
+    j = RunJournal(tmp_path, "demo", "dry")
+    got: list[tuple[str, dict]] = []
+    j.subscribers.append(lambda channel, text: got.append((channel, json.loads(text))))
+    j.event("fill", ticker="A", price=Decimal("0.4"))
     j.write_state({"status": "running"})
-    j.event("order", action="place")
-    assert b"KLP Terminal" in get(base + "/")  # the built React app
-    assert get(base + "/assets/app.js") == b"console.log(1)"
-    assert b"KLP Terminal" in get(base + "/some/client/route")  # SPA fallback
-    [run] = get(base + "/api/runs")
-    assert run["id"] == j.run_id and run["status"] == "running"
-    assert get(f"{base}/api/runs/{j.run_id}/state")["status"] == "running"
-    first = get(f"{base}/api/runs/{j.run_id}/events?offset=0")
-    assert [e["action"] for e in first["events"]] == ["place"]
-    j.event("order", action="cancel")
     j.close()
-    second = get(f"{base}/api/runs/{j.run_id}/events?offset={first['offset']}")
-    assert [e["action"] for e in second["events"]] == ["cancel"]  # only what's new
-
-
-def test_dashboard_rejects_path_traversal(dashboard) -> None:
-    _, base = dashboard
-    with pytest.raises(urllib.error.HTTPError) as err:
-        get(base + "/api/runs/..%2F..%2Fetc/state")
-    assert err.value.code == 404
-    # Static files can't escape the build directory either: never serve a file outside dist.
-    host, port = base.removeprefix("http://").split(":")
-    conn = http.client.HTTPConnection(host, int(port))
-    conn.request("GET", "/assets/../../../pyproject.toml")  # sent verbatim, not normalized
-    resp = conn.getresponse()
-    assert resp.status == 404 and b"[project]" not in resp.read()
-    assert b"[project]" not in get(base + "/assets/..%2F..%2F..%2Fpyproject.toml")
+    j.event("fill", ticker="B")  # closed: nothing written, nothing published
+    assert [channel for channel, _ in got] == ["event", "state"]
+    assert got[0][1]["ticker"] == "A" and got[0][1]["price"] == 0.4
+    assert got[1][1] == {"status": "running"}
 
 
 def test_journal_is_shared_across_runs(tmp_path) -> None:
@@ -270,32 +221,6 @@ async def test_restarted_bot_carries_rewards_and_fills(tmp_path) -> None:
     assert second["totals"]["fills"] == 2
     assert second["ledger"][T]["snapshots"] == 2
     assert second["first_started_at"] == first["first_started_at"]
-
-
-def test_dashboard_tail_and_metrics(dashboard) -> None:
-    root, base = dashboard
-    j = RunJournal(root, "demo", "dry")
-    for i in range(50):
-        j.event("metrics", rewards_earned=i)
-    j.close()
-    size = (j.dir / "events.jsonl").stat().st_size
-    tail = get(f"{base}/api/runs/{j.run_id}/events?tail=200")
-    assert tail["offset"] == size
-    assert 0 < len(tail["events"]) < 50
-    assert tail["events"][-1]["rewards_earned"] == 49
-    thinned = get(f"{base}/api/runs/{j.run_id}/metrics?points=10")
-    assert len(thinned) == 10
-    assert thinned[0]["rewards_earned"] == 0 and thinned[-1]["rewards_earned"] == 49
-
-
-def test_dashboard_lists_most_recent_first_and_hides_archive(dashboard) -> None:
-    root, base = dashboard
-    for name, mtime in (("old", 100.0), ("new", 200.0)):
-        (root / name).mkdir()
-        (root / name / "state.json").write_text("{}")
-        os.utime(root / name / "state.json", (mtime, mtime))
-    (root / "_imported").mkdir()
-    assert [r["id"] for r in get(base + "/api/runs")] == ["new", "old"]
 
 
 def test_older_import_is_repaired_with_unattributed_rewards(tmp_path) -> None:

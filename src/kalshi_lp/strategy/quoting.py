@@ -178,12 +178,30 @@ class QuoteEngine:
         if price < self.cfg.min_price or not grid.is_valid(price):
             return LegDecision(leg, None, f"price {price} below floor")
 
+        size = self._loss_capped(size, price, inventory)
+        if size <= 0:
+            return LegDecision(leg, None, "loss cap")
+
         score = score_side(ctx.book.bids(leg), price, size, ctx.reward, grid)
         kept = self._keep_resting(ctx, leg, grid, price, cap, size, score)
         if kept is not None:
             price, score, how = kept[0], kept[1], how + "(kept)"
         quote = Quote(ctx.market.ticker, leg.order_side, leg.to_yes_price(price), size)
         return LegDecision(leg, quote, how, score, price)
+
+    def _loss_capped(self, size: Decimal, price: Decimal, inventory: Decimal) -> Decimal:
+        """Shrink ``size`` so a fill can lose at most ``max_loss_per_fill``.
+
+        Buying a leg at ``price`` loses at most ``price`` per contract (if that side
+        goes to 0), whatever the cushion: a real-world event can move a market from
+        0.56 to 0.95 in one second, straight through every resting order. Orders
+        that close a short on this leg add no such risk and aren't capped.
+        """
+        limit = self.cfg.max_loss_per_fill
+        if limit is None or price <= 0 or inventory < 0:
+            return size
+        cap = (limit / price).to_integral_value(rounding=ROUND_FLOOR)
+        return min(size, cap)
 
     def _keep_resting(
         self,

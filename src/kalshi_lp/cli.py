@@ -20,8 +20,10 @@ from decimal import Decimal
 from typing import Any
 
 from kalshi_lp import __version__
+from kalshi_lp.api import DashboardApi
 from kalshi_lp.config import ConfigError, Environment, Settings, load_settings
 from kalshi_lp.engine.bot import LiquidityBot
+from kalshi_lp.engine.controls import BotControls
 from kalshi_lp.engine.executor import OrderExecutor
 from kalshi_lp.engine.reconciler import Plan
 from kalshi_lp.exchange.auth import KeyLoadError, Signer
@@ -226,16 +228,24 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
             "dry" if settings.dry_run else "live",
             name=args.journal,
         )
-        log.info(
-            "journal: %s, session %d (view with: make dashboard)", journal.dir, journal.session
-        )
+        log.info("journal: %s, session %d", journal.dir, journal.session)
         bot = LiquidityBot(settings, client, signer=signer, journal=journal)
+        api = None
+        if settings.api.enabled:
+            controls = BotControls(bot) if settings.api.controls else None
+            api = DashboardApi(journal, settings.api, controls)
+        if api is not None:
+            await api.start()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, bot.stop)
         if args.duration:
             loop.call_later(args.duration, bot.stop)
-        await bot.run()
+        try:
+            await bot.run()
+        finally:
+            if api is not None:
+                await api.stop()  # after the final snapshot, so the dashboard shows how it ended
         if bot.risk.halted:
             log.critical("bot halted: %s", bot.risk.halt_reason)
             return 2

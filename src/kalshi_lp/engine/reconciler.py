@@ -113,8 +113,8 @@ def reconcile(
 
         if still_needed >= min_topup or (not at_price and still_needed > 0):
             plan.creates.append(Quote(quote.ticker, side, quote.price, still_needed))
-            if at_price:
-                what = "top up after a partial fill"
+            if at_price:  # a partial fill, or a bigger size (e.g. a larger budget)
+                what = f"top up {quote.size - still_needed:f} -> {quote.size:f}"
             elif moved:
                 what = f"reprice from {_px(max(o.yes_price for o in moved))}"
             else:

@@ -59,6 +59,27 @@ body.simulated .kpi .v, body.simulated .chart .t b { color: var(--yellow); }
 .badge.running { color: var(--green); } .badge.stale { color: var(--yellow); }
 .badge.ended { color: var(--muted); } .badge.halted { color: var(--red); }
 .badge.live { color: var(--red); } .badge.dry-run { color: var(--cyan); }
+.badge.held { color: #000; background: var(--yellow); }
+.badge.held .ago { color: #000; }
+
+/* control buttons (top bar): black keys like the badges; two-click ones turn solid when armed */
+.ctl { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.ctl button, .ctl input { font: inherit; font-size: 11px; line-height: 16px; }
+.ctl button { background: #000; color: var(--text); border: 1px solid #000; padding: 0 6px;
+              text-transform: uppercase; font-weight: 700; cursor: pointer; }
+.ctl button:hover:not(:disabled) { background: var(--hover); }
+.ctl button:focus-visible { outline: 1px solid var(--yellow); outline-offset: 1px; }
+.ctl button:disabled { color: var(--muted); cursor: default; }
+.ctl button.go { color: var(--green); }
+.ctl button.warn { color: var(--yellow); }
+.ctl button.danger { color: var(--red); }
+.ctl button.armed, .ctl button.armed:hover:not(:disabled) { background: var(--red); color: #000; }
+.ctl-budget { display: inline-flex; align-items: center; gap: 3px; }
+.ctl-budget input { width: 64px; background: var(--theme-soft); color: #000; border: 1px solid #000;
+                    padding: 0 3px; }
+.ctl-note { font-weight: 400; text-transform: none; padding: 0 6px; background: #000; max-width: 520px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctl-note.ok { color: var(--green); } .ctl-note.err { color: var(--red); }
 
 /* kpis */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 1px;

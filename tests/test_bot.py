@@ -369,3 +369,27 @@ async def test_market_without_capital_left_is_not_quoted() -> None:
     assert bot._decide(second, bot._risk_view()) == (
         "no capital left: higher-paying markets use the budget"
     )
+
+
+async def test_stopping_closes_open_positions(exchange: FakeExchange) -> None:
+    # Even when the exit during trading found no one (here: fills while halting),
+    # shutdown retries until flat.
+    bot, feed = await started(exchange, risk={"flatten_on_fill": True})
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    exchange.fill(bid.order_id, D(10))
+    await bot.shutdown()  # e.g. after a session-loss halt
+    assert exchange.positions[T].position == 0
+    assert exchange.exits and exchange.exits[-1].side is Side.ASK
+
+
+async def test_start_up_closes_positions_left_by_an_earlier_run(exchange: FakeExchange) -> None:
+    from kalshi_lp.exchange.models import Position
+
+    exchange.positions[T] = Position(T, D(-8), D("1.60"), D(0), D(0))
+    feed = FakeFeed(exchange)
+    bot = LiquidityBot(settings(risk={"flatten_on_fill": True}), exchange, feed=feed)  # type: ignore[arg-type]
+    bot.tracker.restore({T: {"earned": 0.1}})  # the ledger says we quoted T before
+    await bot.startup()
+    assert exchange.positions[T].position == 0
+    assert exchange.exits[0].side is Side.BID  # bought back the short

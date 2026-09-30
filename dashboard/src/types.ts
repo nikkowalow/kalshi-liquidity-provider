@@ -105,6 +105,7 @@ export interface RunState {
   ws_connected: boolean
   trading_active: boolean
   globally_paused: boolean
+  held_since?: number | null // paused from the dashboard (unix seconds)
   halt_reason: string
   budget_binding: boolean
   totals: Totals
@@ -118,11 +119,24 @@ export interface Sample {
   totals: Totals
 }
 
-export interface RunInfo {
-  id: string
-  updated_at: number
-  status: string
+/** The control buttons' credentials; null when the bot has them switched off (api.controls). */
+export interface ControlInfo {
+  token: string
+  actions: string[]
 }
+
+/** Messages from the bot's WebSocket (/api/ws; see src/kalshi_lp/api.py). */
+export type ServerMessage =
+  | {
+      channel: 'hello'
+      run_id: string
+      state: RunState | null
+      events: JournalEvent[]
+      metrics: MetricsEvent[]
+      controls?: ControlInfo | null
+    }
+  | { channel: 'events'; data: JournalEvent[] }
+  | { channel: 'state'; data: RunState }
 
 interface Base {
   ts: number

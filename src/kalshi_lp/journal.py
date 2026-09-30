@@ -12,8 +12,9 @@ or config change) continues one history instead of starting a new one:
 ``state.json`` also carries the reward ledger (per-market estimated earnings)
 and counters; a restarted bot reads them back and carries on from there.
 
-Both are plain files so anything can read them while the bot runs: the
-dashboard (``dashboard/server.py``), ``tail -f``, or ``jq``.
+They are plain files, so ``tail -f`` and ``jq`` work while the bot runs. The
+dashboard doesn't read them: the bot's API (:mod:`kalshi_lp.api`) subscribes
+to the journal and pushes each event and snapshot to it as they happen.
 """
 
 from __future__ import annotations
@@ -25,12 +26,16 @@ import os
 import re
 import shutil
 import time
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TextIO
 
 log = logging.getLogger(__name__)
+
+# Live listener: called with ("event", <JSON line>) or ("state", <JSON snapshot>).
+Subscriber = Callable[[str, str], None]
 
 # Per-run directories written by older versions: 20260929-212257-prod-live
 _LEGACY_RUN = re.compile(r"^\d{8}-\d{6}-(?P<env>[a-z]+)-(?P<mode>[a-z]+)$")
@@ -80,23 +85,29 @@ class RunJournal:
         self._events: TextIO | None = (self.dir / "events.jsonl").open("a", buffering=1)
         self._metrics: TextIO | None = (self.dir / "metrics.jsonl").open("a", buffering=1)
         self._state_path = self.dir / "state.json"
+        self.subscribers: list[Subscriber] = []
 
     def event(self, kind: str, **data: Any) -> None:
         if self._events is None:
             return
-        line = _dumps({"ts": time.time(), "type": kind, **data}) + "\n"
-        self._events.write(line)
+        line = _dumps({"ts": time.time(), "type": kind, **data})
+        self._events.write(line + "\n")
         if kind == "metrics" and self._metrics is not None:
-            self._metrics.write(line)
+            self._metrics.write(line + "\n")
+        for subscriber in self.subscribers:
+            subscriber("event", line)
 
     def listener(self, kind: str, data: dict[str, Any]) -> None:
         """Adapter for :attr:`MarketState.listeners`."""
         self.event(kind, **data)
 
     def write_state(self, state: dict[str, Any]) -> None:
+        text = json.dumps(state, default=_default)
         tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, default=_default))
+        tmp.write_text(text)
         os.replace(tmp, self._state_path)  # atomic: readers never see a partial file
+        for subscriber in self.subscribers:
+            subscriber("state", text)
 
     def close(self) -> None:
         for f in (self._events, self._metrics):
@@ -113,6 +124,7 @@ class NullJournal(RunJournal):
         self.previous = {}
         self.session = 1
         self._events = self._metrics = None
+        self.subscribers = []
 
     def write_state(self, state: dict[str, Any]) -> None:
         pass

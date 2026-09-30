@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
+  ControlInfo,
   FillEvent,
   JournalEvent,
   LogEvent,
@@ -8,19 +9,21 @@ import type {
   OrderEvent,
   QuoteEvent,
   RunEndEvent,
-  RunInfo,
   RunStartEvent,
   RunState,
   Sample,
+  ServerMessage,
 } from '../types'
 
 const MAX_EVENTS = 5000
 const LIVE_SECONDS = 3600 // per-second totals kept for the short chart windows
-const MAX_METRICS = 20000 // ~2 days at one sample per 10s; older history comes thinned from /metrics
+const MAX_METRICS = 20000 // ~2 days at one sample per 10s; older history comes thinned in the hello
 const HISTORY_POINTS = 2000
-const TAIL_BYTES = 3_000_000 // first load: only the recent end of a long journal
-const POLL_MS = 1000
-const RUNS_POLL_MS = 3000
+const FLUSH_MS = 100 // messages arriving within this window are applied in one render
+const RETRY_MS = [500, 1000, 2000, 5000] // reconnect backoff while the bot is down
+
+/** The link to the bot: waiting for the first hello, streaming, or lost (reconnecting). */
+export type Link = 'connecting' | 'live' | 'offline'
 
 export interface Journal {
   orders: OrderEvent[]
@@ -99,7 +102,9 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
 }
 
 /** Add a snapshot's totals to the per-second history (skipping repeats, keeping an hour). */
-function appendSample(prev: Sample[], sample: Sample): Sample[] {
+function appendSample(prev: Sample[], snapshot: RunState): Sample[] {
+  if (!snapshot.totals) return prev
+  const sample = { t: snapshot.updated_at, totals: snapshot.totals }
   const last = prev.at(-1)
   if (last && last.t >= sample.t) return prev
   const cutoff = sample.t - LIVE_SECONDS
@@ -107,113 +112,97 @@ function appendSample(prev: Sample[], sample: Sample): Sample[] {
   return [...kept, sample]
 }
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store' })
-  if (!res.ok) throw new Error(`${url}: ${res.status}`)
-  return res.json() as Promise<T>
-}
-
-/** Polls the journal server: run list, the selected run's snapshot, and new events. */
+/**
+ * The running bot, live: one WebSocket to its API (/api/ws, see src/kalshi_lp/api.py).
+ *
+ * The bot greets each connection with its latest snapshot, recent events and the
+ * totals history, then pushes every event and snapshot as it happens. While the
+ * bot is stopped the page keeps what it last had and reconnects on its own; a
+ * restarted bot's hello replaces everything.
+ */
 export function useJournal() {
-  const [runs, setRuns] = useState<RunInfo[]>([])
   const [runId, setRunId] = useState<string | null>(null)
-  const [follow, setFollow] = useState(true)
   const [state, setState] = useState<RunState | null>(null)
   const [journal, setJournal] = useState<Journal>(emptyJournal)
   // Totals from every snapshot while the page is open: per-second detail for short charts.
   const [live, setLive] = useState<Sample[]>([])
-  const [connected, setConnected] = useState(true)
-  const offset = useRef<number | null>(null) // null: not loaded yet, start from the tail
-  const activeRun = useRef<string | null>(null)
+  const [link, setLink] = useState<Link>('connecting')
+  const [controls, setControls] = useState<ControlInfo | null>(null)
 
-  const selectRun = useCallback((id: string | null) => {
-    activeRun.current = id
-    offset.current = null
-    setRunId(id)
-    setState(null)
-    setJournal(emptyJournal())
-    setLive([])
+  useEffect(() => {
+    let socket: WebSocket | null = null
+    let stopped = false
+    let attempt = 0
+    let retry: ReturnType<typeof setTimeout> | undefined
+    let flushTimer: ReturnType<typeof setTimeout> | undefined
+    let pending: JournalEvent[] = []
+    let snapshot: RunState | null = null
+
+    const flush = () => {
+      flushTimer = undefined
+      const events = pending
+      const snap = snapshot
+      pending = []
+      snapshot = null
+      if (events.length) setJournal((j) => ingest(j, events))
+      if (snap) {
+        setState(snap)
+        setLive((prev) => appendSample(prev, snap))
+      }
+    }
+    const schedule = () => {
+      if (flushTimer === undefined) flushTimer = setTimeout(flush, FLUSH_MS)
+    }
+
+    const onMessage = (ev: MessageEvent<string>) => {
+      const msg = JSON.parse(ev.data) as ServerMessage
+      switch (msg.channel) {
+        case 'hello':
+          pending = []
+          snapshot = null
+          attempt = 0
+          setRunId(msg.run_id)
+          setControls(msg.controls ?? null) // a new token every time the bot starts
+          setJournal(ingest({ ...emptyJournal(), metrics: msg.metrics }, msg.events))
+          if (msg.state) {
+            const first = msg.state
+            setState(first)
+            setLive((prev) => appendSample(prev, first))
+          }
+          setLink('live')
+          break
+        case 'events':
+          for (const e of msg.data) pending.push(e)
+          schedule()
+          break
+        case 'state':
+          snapshot = msg.data
+          schedule()
+          break
+      }
+    }
+
+    const connect = () => {
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
+      const ws = new WebSocket(`${scheme}://${location.host}/api/ws?points=${HISTORY_POINTS}`)
+      socket = ws
+      ws.onmessage = onMessage
+      ws.onclose = () => {
+        if (stopped) return
+        clearTimeout(flushTimer)
+        flush() // whatever arrived just before the bot went away (e.g. its final snapshot)
+        setLink('offline')
+        retry = setTimeout(connect, RETRY_MS[Math.min(attempt++, RETRY_MS.length - 1)])
+      }
+    }
+    connect()
+    return () => {
+      stopped = true
+      clearTimeout(retry)
+      clearTimeout(flushTimer)
+      socket?.close()
+    }
   }, [])
 
-  // Run list, and "follow latest".
-  useEffect(() => {
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const list = await getJSON<RunInfo[]>('/api/runs')
-        if (cancelled) return
-        setRuns(list)
-        setConnected(true)
-        const latest = list[0]?.id ?? null
-        if (latest && (follow || activeRun.current === null) && latest !== activeRun.current) {
-          selectRun(latest)
-        }
-      } catch {
-        if (!cancelled) setConnected(false)
-      }
-    }
-    void poll()
-    const timer = setInterval(poll, RUNS_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [follow, selectRun])
-
-  // Snapshot + incremental events for the selected run.
-  useEffect(() => {
-    if (!runId) return
-    let cancelled = false
-    let busy = false
-    const poll = async () => {
-      if (busy) return
-      busy = true
-      try {
-        const first = offset.current === null
-        const [snapshot, batch, history] = await Promise.all([
-          getJSON<RunState>(`/api/runs/${runId}/state`),
-          getJSON<{ events: JournalEvent[]; offset: number }>(
-            first
-              ? `/api/runs/${runId}/events?tail=${TAIL_BYTES}`
-              : `/api/runs/${runId}/events?offset=${offset.current}`,
-          ),
-          first
-            ? // Optional: an older server has no /metrics; the charts then fill from events.
-              getJSON<MetricsEvent[]>(`/api/runs/${runId}/metrics?points=${HISTORY_POINTS}`).catch(
-                () => null,
-              )
-            : Promise.resolve(null),
-        ])
-        if (cancelled || activeRun.current !== runId) return
-        offset.current = batch.offset
-        setState(snapshot)
-        if (snapshot.totals) {
-          setLive((prev) => appendSample(prev, { t: snapshot.updated_at, totals: snapshot.totals }))
-        }
-        if (history) setJournal((j) => ({ ...j, metrics: history }))
-        if (batch.events.length) setJournal((j) => ingest(j, batch.events))
-        setConnected(true)
-      } catch {
-        if (!cancelled) setConnected(false)
-      } finally {
-        busy = false
-      }
-    }
-    void poll()
-    const timer = setInterval(poll, POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [runId])
-
-  const chooseRun = useCallback(
-    (id: string) => {
-      setFollow(false)
-      selectRun(id)
-    },
-    [selectRun],
-  )
-
-  return { runs, runId, chooseRun, follow, setFollow, state, journal, connected, live }
+  return { runId, state, journal, live, link, controls }
 }

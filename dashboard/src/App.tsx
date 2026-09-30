@@ -1,5 +1,6 @@
 import { Blotter } from './components/Blotter'
 import { Charts } from './components/Charts'
+import { Controls } from './components/Controls'
 import { EarningsMix } from './components/EarningsMix'
 import { HelpLayer } from './components/HelpLayer'
 import { Kpis } from './components/Kpis'
@@ -8,13 +9,14 @@ import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/Si
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
 import { useEffect, useMemo } from 'react'
+import { num } from './lib/format'
 import { scaleJournal, scaleSamples, scaleState } from './lib/scale'
 import { useJournal } from './lib/useJournal'
 import { useMultiplier } from './lib/useMultiplier'
 
 export default function App() {
   const raw = useJournal()
-  const { runs, runId, chooseRun, follow, setFollow, connected } = raw
+  const { runId, link } = raw
   const [multiplier, setMultiplier] = useMultiplier()
   // Everything below sees the projected numbers; the multiplier is display-only.
   const { state, rewardFactor } = useMemo(
@@ -45,16 +47,20 @@ export default function App() {
   return (
     <>
       <TopBar
-        runs={runs}
         runId={runId}
-        onChooseRun={chooseRun}
-        follow={follow}
-        onFollow={setFollow}
+        link={link}
         state={state}
-        serverUp={connected}
         multiplier={multiplier}
         onMultiplier={setMultiplier}
         rewardFactor={rewardFactor}
+        controls={
+          <Controls
+            controls={raw.controls}
+            live={link === 'live'}
+            heldSince={raw.state?.held_since ?? null}
+            maxCapital={num(raw.state?.totals?.max_capital)} // the real budget, not multiplied
+          />
+        }
       />
       <Kpis state={state} fills={journal.fills.length} rejects={rejects} live={live} />
       <Tape fills={journal.fills} orders={journal.orders} logs={journal.logs} />
@@ -74,8 +80,8 @@ export default function App() {
         />
       </div>
       <div className="foot">
-        kalshi-lp · reads runs/&lt;run&gt;/state.json + events.jsonl via dashboard/server.py · polls
-        every 1s · reward figures are the bot&apos;s own estimate of Kalshi&apos;s scoring, not a
+        kalshi-lp · live from the bot over a WebSocket (/api/ws; HTTP endpoints listed at /api) ·
+        reward figures are the bot&apos;s own estimate of Kalshi&apos;s scoring, not a
         statement · hover any underlined label for an explanation
       </div>
       <HelpLayer />

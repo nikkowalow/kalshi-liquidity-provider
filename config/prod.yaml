@@ -60,15 +60,20 @@ selection:
   protect_unpaid: true # leaving a market with unpaid earnings under $1 forfeits them: count that
   payout_minimum: 1 # Kalshi pays nothing below $1
   exclude_tickers: []
+  # Markets that resolve on a sudden event jump straight through every resting order (the
+  # $7.85 KXBIGGESTQUAKE loss: 0.56 -> 0.95 in one second when a quake hit). Stay out.
+  exclude_series: [KXBIGGESTQUAKE, KXTRUMPMENTION, KXTRUMPMENTIONB, KXTRUMPSAYCOMPANY]
 
 quoting:
   placement: reward
-  share_tolerance: 0.25 # accept 25% less reward share for a deeper, safer price
+  share_tolerance: 0.4 # accept up to 40% less reward share for a deeper, safer price
   size: 4 # contracts per side when auto_size is off
   auto_size: true # capital to the best markets first, each at max_size (selection estimates at it)
+  max_loss_per_fill: 3 # size each order so a full fill + worst-case move loses <= $3
+  # (size <= 3 / price: 6 contracts at 0.50, 10 at 0.30). The only cap that works on jumps.
   max_size: 30 # contracts per side per market with auto_size
   capital_utilization: 0.95 # put 95% of the budget to work
-  offset_ticks: 0
+  offset_ticks: 1 # one extra tick behind the reward-optimal price: more queue in front of us
   min_edge: 0.01
   skew_per_contract: 0.005 # 4 contracts held -> quotes shift 2c away
   max_skew: 0.05

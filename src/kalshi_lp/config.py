@@ -89,6 +89,14 @@ class SelectionConfig(_Section):
     )
     tickers: list[str] = Field(default_factory=list)
     exclude_tickers: list[str] = Field(default_factory=list)
+    exclude_series: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Series never to quote (the ticker prefix, e.g. KXBIGGESTQUAKE). For markets that "
+            "resolve on a sudden event: an earthquake, a word being said. They jump straight "
+            "through every resting order, and their trade history rarely shows it coming."
+        ),
+    )
     max_markets: int = Field(5, ge=1, le=100)
     max_per_series: int = Field(
         2, ge=1, description="Diversify: cap markets from one series (their outcomes correlate)."
@@ -204,6 +212,15 @@ class QuotingConfig(_Section):
         description="reward placement: accept this much less share for a deeper, safer price.",
     )
     size: Decimal = Field(Decimal("10"), gt=0, description="Contracts per side.")
+    max_loss_per_fill: Decimal | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Cap each order so a complete fill followed by the worst possible move (the "
+            "bought side going to 0) loses at most this many dollars: size <= cap / price. "
+            "The only protection that works against event jumps, which blow through any cushion."
+        ),
+    )
     auto_size: bool = Field(
         False,
         description=(
@@ -331,6 +348,27 @@ class LoggingConfig(_Section):
     json_format: bool = False
 
 
+class ApiConfig(_Section):
+    enabled: bool = Field(
+        True, description="Serve the dashboard and its API (HTTP + WebSocket) while the bot runs."
+    )
+    host: str = Field(
+        "127.0.0.1",
+        description="Bind address. Keep it on localhost: the API shows positions and orders.",
+    )
+    port: int = Field(8050, ge=0, le=65535, description="0 picks a free port.")
+    static_dir: Path | None = Field(
+        Path("dashboard/dist"), description="Built dashboard (npm run build) served at /."
+    )
+    controls: bool = Field(
+        True,
+        description=(
+            "Allow the dashboard's buttons (pause, resume, flatten, rescan, budget, stop): "
+            "POST /api/control/<action> with the token from <journal>/api-token."
+        ),
+    )
+
+
 class Credentials(_Section):
     key_id: str
     private_key_path: Path
@@ -348,6 +386,7 @@ class Settings(_Section):
     quoting: QuotingConfig = Field(default_factory=QuotingConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
 
     @property
     def api_url(self) -> str:
