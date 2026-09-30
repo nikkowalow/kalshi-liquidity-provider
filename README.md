@@ -283,9 +283,14 @@ quoting (the program and market list is reused for `catalog_refresh_seconds`; or
 trades are fresh each scan). With `quoting.auto_size`, rewards are estimated at the size the bot
 will really quote, and the capital goes to the highest net $/h markets first, each at `max_size`,
 until `max_capital` is used. Spreading the budget over more markets would only average in worse
-ones. A better market takes a slot once it pays `incumbent_bonus` (10%) more; smaller gaps are
-estimate noise. With `protect_unpaid`, a market holding unpaid earnings below Kalshi's $1 minimum
-counts what leaving would forfeit.
+ones. Each leg is charged the cash it really locks: with `max_loss_per_fill`, an expensive leg
+rests only a few contracts (at most $3 of them with a $3 cap), so a market costs far less than
+size x $1 a pair, and the budget funds that many more markets. A better market takes a slot once
+it pays `incumbent_bonus` (10%) more; smaller gaps are estimate noise. A newly picked market also
+keeps its slot for `min_hold_seconds` (15 min) unless it stops passing the filters or gets
+paused, so markets don't flip in and out as estimates wobble. With `protect_unpaid`, a market
+holding unpaid earnings below Kalshi's $1 minimum counts what leaving would forfeit. Sizes only
+grow in steps of 20% or more, so book jitter doesn't resize orders back and forth.
 
 ## Quoting
 

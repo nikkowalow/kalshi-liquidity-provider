@@ -393,3 +393,82 @@ async def test_start_up_closes_positions_left_by_an_earlier_run(exchange: FakeEx
     await bot.startup()
     assert exchange.positions[T].position == 0
     assert exchange.exits[0].side is Side.BID  # bought back the short
+
+
+# ------------------------------------------------- capital, churn, and switching
+
+
+async def test_auto_size_charges_loss_capped_legs_only_what_they_lock(
+    exchange: FakeExchange,
+) -> None:
+    # Quotes rest at 0.40 (YES) and 0.50 (NO). A $2 cap allows 5 YES and 4 NO, which lock
+    # 5 x 0.40 + 4 x 0.50 = $4 at any size: $5 funds the full 20, not $5 / $0.90 = 5.
+    bot, feed = await started(
+        exchange,
+        quoting={
+            "auto_size": True,
+            "capital_utilization": 1,
+            "max_size": 20,
+            "max_loss_per_fill": 2,
+        },
+        risk={"max_capital": 5, "max_position_per_market": 100},
+    )
+    await step(bot, feed)
+    assert bot._sizes[T] == 20
+    assert resting(exchange) == [(Side.ASK, D("0.50"), D(4)), (Side.BID, D("0.40"), D(5))]
+    assert bot.capital_in_use() <= 5
+
+
+async def test_auto_size_ignores_small_growth_but_always_shrinks(exchange: FakeExchange) -> None:
+    # $9 at $0.90 a pair funds 10 contracts.
+    bot, feed = await started(
+        exchange,
+        quoting={"auto_size": True, "capital_utilization": 1},
+        risk={"max_capital": 9, "max_position_per_market": 100},
+    )
+    feed.sync()
+    for previous, expected in ((9, 9), (8, 10), (12, 10), (0, 10)):
+        bot._sizes = {T: D(previous)}
+        assert bot._auto_sizes()[T] == expected, previous
+
+
+async def test_recently_selected_market_keeps_its_slot() -> None:
+    now = datetime.now(UTC)
+
+    def paying(ticker: str, period_reward: int) -> IncentiveProgram:
+        return IncentiveProgram(
+            "p-" + ticker,
+            ticker,
+            "liquidity",
+            now - timedelta(days=1),
+            now + timedelta(days=1),
+            D(period_reward),
+            False,
+            D("0.5"),
+            D(100),
+        )
+
+    book = make_book(yes=[("0.40", 15), ("0.38", 100)], no=[("0.50", 15), ("0.48", 100)])
+    ex = FakeExchange([make_market("AAA-1"), make_market("BBB-1")], {"AAA-1": book, "BBB-1": book})
+    ex.programs = [paying("AAA-1", 400), paying("BBB-1", 200)]
+    bot, _ = await started(
+        ex, selection={"mode": "incentives", "max_markets": 1, "catalog_refresh_seconds": 0}
+    )
+    assert list(bot.markets) == ["AAA-1"]
+    ex.programs = [paying("AAA-1", 200), paying("BBB-1", 800)]  # BBB now pays 4x as much
+    await bot.reselect()
+    assert list(bot.markets) == ["AAA-1"]  # within min_hold_seconds (15 min): stays
+    bot._selected_at["AAA-1"] -= bot.settings.selection.min_hold_seconds
+    await bot.reselect()
+    assert list(bot.markets) == ["BBB-1"]  # hold over: the better market takes the slot
+
+
+async def test_cant_flatten_warning_is_not_repeated_every_requote(
+    exchange: FakeExchange, caplog: pytest.LogCaptureFixture
+) -> None:
+    from kalshi_lp.engine.reconciler import Plan
+
+    bot, _ = await started(exchange)
+    for _ in range(5):
+        assert not bot._add_exit(Plan(), T, D(8), None, D("0.02"))
+    assert caplog.text.count("can't flatten") == 1

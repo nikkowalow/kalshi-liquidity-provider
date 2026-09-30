@@ -27,7 +27,7 @@ import logging
 import random
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Protocol
@@ -62,6 +62,8 @@ from kalshi_lp.strategy.selection import Candidate, MarketSelector
 log = logging.getLogger(__name__)
 
 TRANSIENT_ERRORS = (KalshiError, httpx.HTTPError)
+RESIZE_STEP = Decimal("0.2")  # auto sizing: grow a market's size only by 20% or more
+FLATTEN_WARN_SECONDS = 300.0  # "can't flatten" is logged at most this often per market
 
 
 class Feed(Protocol):
@@ -145,6 +147,8 @@ class LiquidityBot:
         self._group_needs_reset = False
         self._budget_binding = False
         self._last_exit: dict[str, float] = {}  # ticker -> monotonic time of the last exit order
+        self._flatten_warned: dict[str, float] = {}  # ticker -> last "can't flatten" warning
+        self._selected_at: dict[str, float] = {}  # ticker -> monotonic time it was selected
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
         self._rescan_requested = False  # re-rank at once (from the dashboard)
@@ -358,7 +362,15 @@ class LiquidityBot:
         previous = [t for t in self.markets if t not in self.reduce_only]
         # Paused markets sit out this round so their slot can go to a better market.
         paused = {t for t in previous if self.risk.market_paused(t)}
-        candidates = await self.selector.select(incumbents, exclude=paused)
+        # Recently selected markets keep their slots a while (unless they stop qualifying).
+        hold = self.settings.selection.min_hold_seconds
+        now = time.monotonic()
+        keep = {
+            t
+            for t in previous
+            if t not in paused and now - self._selected_at.get(t, float("-inf")) < hold
+        }
+        candidates = await self.selector.select(incumbents, exclude=paused, keep=keep)
         chosen = {c.ticker for c in candidates}
         # Nothing better to take their slot? Paused markets keep it (resuming after the pause).
         room = self.settings.selection.max_markets - len(candidates)
@@ -392,6 +404,8 @@ class LiquidityBot:
                 self.reduce_only.add(market.ticker)
         for c in candidates:
             self._selected[c.ticker] = c
+        now = time.monotonic()  # when each market got its slot (for min_hold_seconds)
+        self._selected_at = {t: self._selected_at.get(t, now) for t in self.markets}
 
         changed = [c.ticker for c in candidates] != [
             t for t in scan.previous if t not in scan.paused
@@ -655,8 +669,15 @@ class LiquidityBot:
             price = None if best is None else min(best + slippage, Decimal("0.99"))
             side = Side.BID
         if price is None:
-            log.warning("%s: can't flatten %s, no price on the other side", ticker, position)
+            # Retried every requote until someone bids; say so every few minutes, not each time.
+            now = time.monotonic()
+            if now - self._flatten_warned.get(ticker, float("-inf")) >= FLATTEN_WARN_SECONDS:
+                self._flatten_warned[ticker] = now
+                log.warning(
+                    "%s: can't flatten %s, no price on the other side (retrying)", ticker, position
+                )
             return False
+        self._flatten_warned.pop(ticker, None)
         if market is not None:
             price = (
                 market.grid.round_down(price) if side is Side.ASK else market.grid.round_up(price)
@@ -717,7 +738,14 @@ class LiquidityBot:
         return found, open_
 
     def _auto_sizes(self) -> dict[str, Decimal]:
-        """Per-market size that puts the capital budget to work (quoting.auto_size)."""
+        """Per-market size that puts the capital budget to work (quoting.auto_size).
+
+        Best market first (self.markets is in selection order): each gets full
+        size until the budget runs out, since rewards scale with size. A leg
+        capped by max_loss_per_fill is charged only what the cap lets it lock.
+        A market's size only grows once it can grow by RESIZE_STEP or more, so
+        book jitter doesn't resize (and re-queue) its orders back and forth.
+        """
         q, cap = self.settings.quoting, self.settings.risk.max_capital
         if not q.auto_size or cap is None:
             return {}
@@ -736,22 +764,42 @@ class LiquidityBot:
         limit = self.settings.risk.max_position_per_market
         if q.max_size is not None:
             limit = min(limit, q.max_size)
-        # Best market first (self.markets is in selection order): each gets full size
-        # until the budget runs out. Rewards scale with size, so this beats an even split.
         sizes: dict[str, Decimal] = {}
         for ticker in active:
             book = self.state.book(ticker)
             if book is None or book.best_yes_bid is None or book.best_yes_ask is None:
                 continue
-            # A YES bid at the best bid plus a NO bid at 1 - best ask: an upper bound on
-            # what one contract per side locks (our quotes usually rest deeper, cheaper).
-            pair = book.best_yes_bid + (1 - book.best_yes_ask)
-            if pair <= 0:
+            # A YES bid at the best bid and a NO bid at 1 - best ask: an upper bound on
+            # each leg's price (our quotes usually rest deeper, cheaper).
+            legs = [p for p in (book.best_yes_bid, 1 - book.best_yes_ask) if p > 0]
+            if not legs:
                 continue
-            size = min((remaining / pair).to_integral_value(rounding=ROUND_FLOOR), limit)
-            sizes[ticker] = max(size, ZERO)
-            remaining -= sizes[ticker] * pair
+            size = self._affordable(legs, limit, remaining)
+            previous = self._sizes.get(ticker)
+            if previous is not None and ZERO < previous < size < previous * (1 + RESIZE_STEP):
+                size = previous  # a few more contracts isn't worth resizing the orders
+            sizes[ticker] = size
+            remaining -= self._locked(legs, size)
         return sizes
+
+    def _locked(self, legs: Sequence[Decimal], size: Decimal) -> Decimal:
+        """Cash ``size`` contracts per leg lock at these leg prices, after the loss cap."""
+        total = ZERO
+        for price in legs:
+            cap = self.engine.loss_cap(price)
+            total += (size if cap is None else min(size, cap)) * price
+        return total
+
+    def _affordable(self, legs: Sequence[Decimal], limit: Decimal, budget: Decimal) -> Decimal:
+        """Largest whole size, up to ``limit``, whose locked cash fits ``budget``."""
+        lo, hi = 0, int(limit.to_integral_value(rounding=ROUND_FLOOR))
+        while lo < hi:  # _locked only grows with size: binary search
+            mid = (lo + hi + 1) // 2
+            if self._locked(legs, Decimal(mid)) <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        return Decimal(lo)
 
     def _moved_too_fast(self, ticker: str, mid: Decimal | None) -> bool:
         """Move guard: pause a market whose mid moved ``max_mid_move`` within the window."""

@@ -73,6 +73,16 @@ class Candidate:
         return max((q.size for q in self.quotes.values()), default=ZERO)
 
     @property
+    def capital_needed(self) -> Decimal:
+        """Cash the planned quotes lock: each leg's own size (after the loss cap) x its price.
+
+        Not size x pair_cost: with max_loss_per_fill, the expensive leg is often
+        far smaller than the cheap one (30 YES at 5c but 3 NO at 90c locks $4.20,
+        not 30 x $0.95 = $28.50).
+        """
+        return sum((q.size * q.price for q in self.quotes.values()), ZERO)
+
+    @property
     def fill_cost_per_day(self) -> Decimal:
         return self.fill_risk.cost_per_day if self.fill_risk else ZERO
 
@@ -239,10 +249,13 @@ class MarketSelector:
         self,
         incumbents: Mapping[str, Decimal] | None = None,
         exclude: Iterable[str] = (),
+        keep: Iterable[str] = (),
     ) -> list[Candidate]:
         """Pick markets. ``incumbents`` maps markets we already hold a stake in (quoting now,
         or rewards earned) to the rewards earned there; they get ``incumbent_bonus``.
-        ``exclude`` sits markets out of this round (e.g. paused ones)."""
+        ``exclude`` sits markets out of this round (e.g. paused ones). ``keep`` (markets
+        within min_hold_seconds of being selected) keep their slots, first in line for
+        capital, as long as they still pass the filters."""
         self._incumbents = dict(incumbents or {})
         self._exclude = set(exclude)
         catalog = await self._current_catalog()
@@ -258,6 +271,8 @@ class MarketSelector:
             worth_it = self._explain_and_filter(ranked)
             if self.cfg.fill_risk and worth_it:
                 worth_it = await self._apply_fill_risk(worth_it)
+            held = set(keep)
+            worth_it.sort(key=lambda c: c.ticker not in held)  # stable: rank order otherwise
             if worth_it or not self.cfg.fallback_to_volume:
                 return self._fit_capital(self._diversify(worth_it, self.cfg.max_markets))
             log.warning("no incentive market passed filters; falling back to volume ranking")
@@ -413,7 +428,7 @@ class MarketSelector:
         budget = self.max_capital * self.quoting.capital_utilization
         chosen: list[Candidate] = []
         for c in ranked:
-            need = c.size * c.pair_cost
+            need = c.capital_needed
             if need <= 0:
                 continue
             if need <= budget:

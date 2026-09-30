@@ -184,6 +184,15 @@ class SelectionConfig(_Section):
             "toward Kalshi's $1 minimum payout."
         ),
     )
+    min_hold_seconds: float = Field(
+        900,
+        ge=0,
+        description=(
+            "A market keeps its slot at least this long after being selected, even if others "
+            "now rank higher, as long as it still passes every filter and isn't paused. Stops "
+            "markets flipping in and out as the estimates wobble from scan to scan."
+        ),
+    )
     min_period_payout: Decimal = Field(
         Decimal("0"),
         ge=0,

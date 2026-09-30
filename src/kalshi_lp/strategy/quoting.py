@@ -197,11 +197,21 @@ class QuoteEngine:
         0.56 to 0.95 in one second, straight through every resting order. Orders
         that close a short on this leg add no such risk and aren't capped.
         """
-        limit = self.cfg.max_loss_per_fill
-        if limit is None or price <= 0 or inventory < 0:
+        cap = self.loss_cap(price)
+        if cap is None or inventory < 0:
             return size
-        cap = (limit / price).to_integral_value(rounding=ROUND_FLOOR)
         return min(size, cap)
+
+    def loss_cap(self, price: Decimal) -> Decimal | None:
+        """Most contracts a bid at ``price`` (leg terms) may rest under max_loss_per_fill.
+
+        None when there is no cap. Used for sizing and for the capital budget too:
+        a capped leg locks at most max_loss_per_fill, however large the size.
+        """
+        limit = self.cfg.max_loss_per_fill
+        if limit is None or price <= 0:
+            return None
+        return (limit / price).to_integral_value(rounding=ROUND_FLOOR)
 
     def _keep_resting(
         self,

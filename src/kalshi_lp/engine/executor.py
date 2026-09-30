@@ -82,23 +82,33 @@ class OrderExecutor:
 
         await self._cancel(plan.cancels, report)
         for order, size in plan.decreases:
+            resized = Order(
+                order.order_id,
+                order.client_order_id,
+                order.ticker,
+                order.side,
+                order.yes_price,
+                size,
+                order.status,
+            )
             try:
                 await self.client.decrease_order(order, size)
-                report.decreased += 1
-                report.resized.append(
-                    Order(
-                        order.order_id,
-                        order.client_order_id,
-                        order.ticker,
-                        order.side,
-                        order.yes_price,
-                        size,
-                        order.status,
-                    )
-                )
             except KalshiAPIError as exc:
-                report.errors += 1
-                log.warning("decrease %s failed: %s", order.order_id, exc)
+                if (exc.code or "").upper() == "AMEND_ORDER_NO_OP":
+                    # Already that size on the exchange (our copy was stale, e.g. a stream
+                    # update arrived late). Not an error: counting it as one made the bot retry
+                    # every requote until the error breaker paused all quoting for minutes.
+                    log.info("decrease %s: already %s on the exchange", order.order_id, size)
+                    report.resized.append(resized)
+                elif exc.status == 404:
+                    log.info("decrease %s: order already gone (%s)", order.order_id, exc)
+                    report.gone.append(order)
+                else:
+                    report.errors += 1
+                    log.warning("decrease %s failed: %s", order.order_id, exc)
+                continue
+            report.decreased += 1
+            report.resized.append(resized)
         await self._exit(plan.exits, report)
         await self._create(plan, report)
         return report

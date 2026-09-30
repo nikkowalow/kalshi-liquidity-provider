@@ -57,6 +57,8 @@ selection:
   catalog_refresh_seconds: 600 # reuse the program/market list for 10 min; books are always fresh
   incumbent_bonus: 0.10 # switching margin: a better market must pay 10%+ more $/h to take a slot
   # (smaller gaps are estimate noise, and each switch loses the queue spot)
+  min_hold_seconds: 900 # a newly picked market keeps its slot 15 min unless it stops qualifying
+  # or gets paused (stops markets flipping in and out every few scans)
   protect_unpaid: true # leaving a market with unpaid earnings under $1 forfeits them: count that
   payout_minimum: 1 # Kalshi pays nothing below $1
   exclude_tickers: []

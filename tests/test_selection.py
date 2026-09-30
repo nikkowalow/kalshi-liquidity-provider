@@ -311,9 +311,57 @@ async def test_capital_goes_to_the_best_markets_at_full_size() -> None:
     ex.programs = [program("TOP-1", 300), program("MID-1", 200), program("LOW-1", 100)]
     everything = await capital_selector(ex, "1000", mode="incentives").select()
     assert [c.ticker for c in everything] == tickers  # best $/h first
-    two = sum((c.size * c.pair_cost for c in everything[:2]), D(0))
+    two = sum((c.capital_needed for c in everything[:2]), D(0))
     picked = await capital_selector(ex, str(two), mode="incentives").select()
     assert [c.ticker for c in picked] == ["TOP-1", "MID-1"]  # no budget left for LOW-1
+
+
+async def test_capital_counts_what_loss_capped_orders_actually_lock() -> None:
+    # YES bids ~0.20, NO bids ~0.78. A $3 loss cap allows 15 YES but only 3 NO at 0.78, so
+    # a market locks ~10 x 0.20 + 3 x 0.78 = $4.34, not 10 contracts x $0.98 a pair.
+    skewed = make_book(yes=[("0.20", 30), ("0.19", 200)], no=[("0.78", 30), ("0.77", 200)])
+    tickers = ["TOP-1", "MID-1", "LOW-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, skewed))
+    ex.programs = [program("TOP-1", 300), program("MID-1", 200), program("LOW-1", 100)]
+    quoting = QuotingConfig(
+        size=D(4),
+        auto_size=True,
+        max_size=D(10),
+        capital_utilization=D(1),
+        max_loss_per_fill=D(3),
+    )
+
+    def capped(max_capital: Decimal) -> MarketSelector:
+        return MarketSelector(
+            ex,  # type: ignore[arg-type]
+            SelectionConfig(mode="incentives"),
+            quoting,
+            QuoteEngine(quoting, D(50)),
+            max_capital=max_capital,
+        )
+
+    everything = await capped(D(1000)).select()
+    top = everything[0]
+    assert {q.size for q in top.quotes.values()} == {D(10), D(3)}  # the NO leg is capped
+    assert top.capital_needed < D(5) < top.size * top.pair_cost
+    budget = sum((c.capital_needed for c in everything[:2]), D(0))
+    picked = await capped(budget).select()
+    assert [c.ticker for c in picked] == ["TOP-1", "MID-1"]  # size x pair cost: TOP-1 only
+
+
+async def test_recently_selected_market_keeps_its_slot_while_it_qualifies() -> None:
+    tickers = ["APPROVE-OLD", "APPROVE-NEW"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("APPROVE-OLD", 100), program("APPROVE-NEW", 200)]
+    held = {"APPROVE-OLD": D(0)}
+    pick = selector(ex, mode="incentives", max_per_series=1)
+    [c] = await pick.select(held)
+    assert c.ticker == "APPROVE-NEW"  # twice the reward beats the switching margin...
+    [c] = await selector(ex, mode="incentives", max_per_series=1).select(held, keep=held)
+    assert c.ticker == "APPROVE-OLD"  # ...but not a market still within its hold time
+    ex.programs = [program("APPROVE-NEW", 200)]  # OLD's program ended: it no longer qualifies
+    [c] = await selector(ex, mode="incentives", max_per_series=1).select(held, keep=held)
+    assert c.ticker == "APPROVE-NEW"
 
 
 async def test_default_margin_switches_to_a_meaningfully_better_market() -> None:
