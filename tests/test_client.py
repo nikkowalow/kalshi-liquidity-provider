@@ -222,3 +222,28 @@ async def test_queue_positions(client: KalshiClient) -> None:
     )
     assert await client.get_queue_positions(["M", "N"]) == {"o1": D(42)}
     assert route.calls[0].request.url.params["market_tickers"] == "M,N"
+
+
+@respx.mock
+async def test_trades_paginate_and_parse(client: KalshiClient) -> None:
+    raw = {
+        "trade_id": "t1",
+        "ticker": "MKT",
+        "count_fp": "12.50",
+        "yes_price_dollars": "0.4200",
+        "taker_book_side": "ask",
+        "taker_side": "no",
+        "created_time": "2026-09-30T02:31:01.613143Z",
+    }
+    route = respx.get(f"{BASE}/markets/trades").mock(
+        side_effect=[
+            httpx.Response(200, json={"trades": [raw], "cursor": "next"}),
+            httpx.Response(200, json={"trades": [{**raw, "trade_id": "t2"}, {"bad": 1}]}),
+        ]
+    )
+    trades = await client.get_trades("MKT", min_ts=1_790_000_000.7)
+    assert [t.trade_id for t in trades] == ["t1", "t2"]  # the malformed one is skipped
+    assert trades[0].count == D("12.50") and trades[0].yes_price == D("0.42")
+    first = route.calls[0].request.url.params
+    assert first["ticker"] == "MKT" and first["min_ts"] == "1790000000"
+    assert route.calls[1].request.url.params["cursor"] == "next"

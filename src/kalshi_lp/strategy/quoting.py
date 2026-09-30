@@ -55,6 +55,7 @@ class MarketContext:
     # Our current resting order per leg (leg-terms price, real queue position if known).
     resting: Mapping[Leg, OwnOrder] = field(default_factory=dict)
     resting_age: Mapping[Leg, float] = field(default_factory=dict)  # seconds since placed
+    size: Decimal | None = None  # per-side size for this market (auto sizing); None = cfg.size
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +83,7 @@ class QuoteEngine:
         room = self.max_position - inventory
         if not ctx.allow_increase:
             room = min(room, max(-inventory, ZERO))  # only buy back what we're short
-        size = min(self.cfg.size, room)
+        size = min(ctx.size if ctx.size is not None else self.cfg.size, room)
         return size.to_integral_value(rounding=ROUND_FLOOR) if size > 0 else ZERO
 
     def _price_cap(self, ctx: MarketContext, leg: Leg, grid: PriceGrid) -> Decimal | None:

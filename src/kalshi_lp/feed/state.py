@@ -166,16 +166,30 @@ class MarketState:
         if target:
             self._touch(target)
 
-    def replace_orders(self, orders: Iterable[Order]) -> None:
-        """Adopt a REST snapshot of resting orders, ignoring any we know are gone."""
+    def now(self) -> float:
+        """This state's clock: pass it as ``as_of`` when starting a REST snapshot."""
+        return self._clock()
+
+    def replace_orders(self, orders: Iterable[Order], as_of: float | None = None) -> None:
+        """Adopt a REST snapshot of resting orders, ignoring any we know are gone.
+
+        ``as_of`` is when the snapshot request started (:meth:`now`). Orders we
+        placed after that can't be in it, so they are kept: dropping them would
+        make the bot place them a second time, doubling its orders until the
+        next reconcile.
+        """
         fresh = {
             o.order_id: o
             for o in orders
             if self.is_ours(o.client_order_id) and not self._is_tombstoned(o.order_id)
         }
+        if as_of is not None:
+            for oid, order in self.orders.items():
+                if oid not in fresh and self.first_seen.get(oid, as_of) > as_of:
+                    fresh[oid] = order  # placed after the snapshot was taken
+        now = self._clock()
         for ticker in {o.ticker for o in (*self.orders.values(), *fresh.values())}:
             self._touch(ticker)
-        now = self._clock()
         self.first_seen = {oid: self.first_seen.get(oid, now) for oid in fresh}
         self.orders = fresh
 

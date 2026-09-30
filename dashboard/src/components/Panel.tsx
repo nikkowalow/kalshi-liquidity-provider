@@ -45,11 +45,13 @@ export function Chips<T extends string>({
   selected,
   onToggle,
   helpPrefix,
+  colorClass,
 }: {
   options: readonly T[]
   selected: ReadonlySet<T>
   onToggle: (option: T) => void
   helpPrefix: string
+  colorClass?: (option: T) => string // shows the option's color as a swatch
 }) {
   return (
     <>
@@ -61,6 +63,7 @@ export function Chips<T extends string>({
           data-help={`${helpPrefix}:${o}`}
           onClick={() => onToggle(o)}
         >
+          {colorClass && <i className={`swatch ${colorClass(o)}`}>■</i>}
           {o}
         </button>
       ))}

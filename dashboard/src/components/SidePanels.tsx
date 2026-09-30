@@ -1,11 +1,16 @@
 import { useState } from 'react'
 import type { Journal } from '../lib/useJournal'
-import { hms, px, qty, usd } from '../lib/format'
+import { hms, px, qty, sideClass, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
+import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
-import type { OrderRow, RunState } from '../types'
+import type { FillEvent, MarketsEvent, OrderRow, RunState } from '../types'
+import { competitionRoom } from '../lib/competition'
+import { CompetitionTag } from './CompetitionTag'
+import { FillsCell, NetCell } from './FillRiskCells'
 import { Flash } from './Flash'
 import { Chips, Empty, Panel, PanelHeader } from './Panel'
+import { SortTh } from './SortTh'
 import { Ticker } from './Ticker'
 
 const TARGET_CLASS: Record<OrderRow['in_target'], string> = {
@@ -27,9 +32,33 @@ export function RankBadge({ o }: { o: OrderRow }) {
   )
 }
 
+const ORDER_ACCESSORS: Accessors<OrderRow> = {
+  Ticker: (o) => o.ticker,
+  Side: (o) => o.side,
+  Price: (o) => o.price,
+  Qty: (o) => o.size,
+  Rank: (o) => (o.ahead_total === null ? null : o.ahead_total + 1),
+  Better: (o) => o.ahead_better,
+  Level: (o) => o.queue_ahead,
+  Credit: (o) => o.full_credit,
+  Age: (o) => o.age,
+}
+
+const FILL_ACCESSORS: Accessors<FillEvent> = {
+  Time: (f) => f.ts,
+  Ticker: (f) => f.ticker,
+  Side: (f) => f.side,
+  Price: (f) => (f.price === null ? null : Number(f.price)),
+  Qty: (f) => Number(f.count),
+  Pos: (f) => (f.post_position === null ? null : Number(f.post_position)),
+}
+
 export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journal: Journal }) {
-  const sorted = [...orders].sort((a, b) => a.ticker.localeCompare(b.ticker) || a.side.localeCompare(b.side))
-  const fills = [...journal.fills].reverse().slice(0, 300)
+  const orderSort = useSort('orders')
+  const fillSort = useSort('fills')
+  const byTicker = [...orders].sort((a, b) => a.ticker.localeCompare(b.ticker) || a.side.localeCompare(b.side))
+  const sorted = sortRows(byTicker, ORDER_ACCESSORS, orderSort.state)
+  const fills = sortRows([...journal.fills].reverse(), FILL_ACCESSORS, fillSort.state).slice(0, 300)
   const freshOrders = useFreshKeys(sorted.map((o) => o.order_id))
   const fillKey = (f: (typeof fills)[number]) => `${f.ts}-${f.order_id}-${f.count}`
   const freshFills = useFreshKeys(fills.map(fillKey))
@@ -48,19 +77,33 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
           <table>
             <thead>
               <tr>
-                <th className="l">Ticker</th>
-                <th className="l" data-help="ord:Side">
+                <SortTh k="Ticker" sorter={orderSort} align="l" text>
+                  Ticker
+                </SortTh>
+                <SortTh k="Side" sorter={orderSort} align="l" help="ord:Side" text>
                   Side
-                </th>
-                <th data-help="ord:Price">Price</th>
-                <th data-help="ord:Qty">Qty</th>
-                <th className="l" data-help="ord:Rank">
+                </SortTh>
+                <SortTh k="Price" sorter={orderSort} help="ord:Price">
+                  Price
+                </SortTh>
+                <SortTh k="Qty" sorter={orderSort} help="ord:Qty">
+                  Qty
+                </SortTh>
+                <SortTh k="Rank" sorter={orderSort} align="l" help="ord:Rank">
                   Rank / target
-                </th>
-                <th data-help="ord:Better">Better px</th>
-                <th data-help="ord:Queue">At level</th>
-                <th data-help="ord:Credit">Full credit</th>
-                <th data-help="ord:Age">Age</th>
+                </SortTh>
+                <SortTh k="Better" sorter={orderSort} help="ord:Better">
+                  Better px
+                </SortTh>
+                <SortTh k="Level" sorter={orderSort} help="ord:Queue">
+                  At level
+                </SortTh>
+                <SortTh k="Credit" sorter={orderSort} help="ord:Credit">
+                  Full credit
+                </SortTh>
+                <SortTh k="Age" sorter={orderSort} help="ord:Age">
+                  Age
+                </SortTh>
               </tr>
             </thead>
             <tbody>
@@ -69,9 +112,9 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
                   <td className="l">
                     <Ticker value={o.ticker} />
                   </td>
-                  <td className={`l ${o.side === 'bid' ? 'cy' : 'mg'}`}>{o.side === 'bid' ? 'BID' : 'ASK'}</td>
-                  <td>{px(o.price)}</td>
-                  <td>
+                  <td className={`l ${sideClass(o.side)}`}>{o.side === 'bid' ? 'BID' : 'ASK'}</td>
+                  <td className={sideClass(o.side)}>{px(o.price)}</td>
+                  <td className={sideClass(o.side)}>
                     <Flash value={o.size}>{qty(o.size)}</Flash>
                   </td>
                   <td className="l">
@@ -107,14 +150,24 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
           <table>
             <thead>
               <tr>
-                <th className="l">Time</th>
-                <th className="l">Ticker</th>
-                <th className="l" data-help="fill:Side">
+                <SortTh k="Time" sorter={fillSort} align="l">
+                  Time
+                </SortTh>
+                <SortTh k="Ticker" sorter={fillSort} align="l" text>
+                  Ticker
+                </SortTh>
+                <SortTh k="Side" sorter={fillSort} align="l" help="fill:Side" text>
                   Side
-                </th>
-                <th data-help="fill:Price">Price</th>
-                <th data-help="fill:Qty">Qty</th>
-                <th data-help="fill:Pos after">Pos after</th>
+                </SortTh>
+                <SortTh k="Price" sorter={fillSort} help="fill:Price">
+                  Price
+                </SortTh>
+                <SortTh k="Qty" sorter={fillSort} help="fill:Qty">
+                  Qty
+                </SortTh>
+                <SortTh k="Pos" sorter={fillSort} help="fill:Pos after">
+                  Pos after
+                </SortTh>
               </tr>
             </thead>
             <tbody>
@@ -124,7 +177,7 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
                   <td className="l">
                     <Ticker value={f.ticker} />
                   </td>
-                  <td className={`l ${f.side === 'bid' ? 'cy' : 'mg'}`}>
+                  <td className={`l ${sideClass(f.side)}`}>
                     {(f.side ?? '').toUpperCase()}
                     {f.is_taker && (
                       <span className="tag neg" data-help="fill:TAKER">
@@ -132,8 +185,8 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
                       </span>
                     )}
                   </td>
-                  <td>{px(f.price)}</td>
-                  <td>{qty(f.count)}</td>
+                  <td className={sideClass(f.side)}>{px(f.price)}</td>
+                  <td className={sideClass(f.side)}>{qty(f.count)}</td>
                   <td>{qty(f.post_position)}</td>
                 </tr>
               ))}
@@ -187,7 +240,20 @@ export function LogPanel({ journal }: { journal: Journal }) {
   )
 }
 
+type Selected = MarketsEvent['markets'][number]
+const SELECTION_ACCESSORS: Accessors<Selected> = {
+  Ticker: (m) => m.ticker,
+  Prog: (m) => m.reward_per_day,
+  Target: (m) => m.target_size,
+  Est: (m) => m.est_daily_reward,
+  Comp: (m) => competitionRoom(m.competition),
+  Fills: (m) => m.est_fills_per_day,
+  Net: (m) => m.net_daily_reward,
+  Closes: (m) => (m.close_time ? Date.parse(m.close_time) : null),
+}
+
 export function Selections({ journal }: { journal: Journal }) {
+  const sorter = useSort('selections')
   const selections = [...journal.selections].reverse()
   const fresh = useFreshKeys(selections.map((s) => String(s.ts)))
   return (
@@ -205,28 +271,52 @@ export function Selections({ journal }: { journal: Journal }) {
           <table key={s.ts} className={fresh.has(String(s.ts)) ? 'row-new' : undefined}>
             <thead>
               <tr>
-                <th className="l" colSpan={2}>
+                <SortTh k="Ticker" sorter={sorter} align="l" colSpan={2} text>
                   {hms(s.ts)} · {s.markets.length} markets
                   {s.reduce_only.length ? ` · reduce-only: ${s.reduce_only.join(', ')}` : ''}
-                </th>
-                <th data-help="col:Prog $/d">Prog $/d</th>
-                <th data-help="col:Target">Target</th>
-                <th data-help="sel:Est $/d">Est $/d</th>
-                <th className="l" data-help="sel:Closes">
+                </SortTh>
+                <SortTh k="Prog" sorter={sorter} help="col:Prog $/d">
+                  Prog $/d
+                </SortTh>
+                <SortTh k="Target" sorter={sorter} help="col:Target">
+                  Target
+                </SortTh>
+                <SortTh k="Est" sorter={sorter} help="sel:Est $/d">
+                  Est $/d
+                </SortTh>
+                <SortTh k="Comp" sorter={sorter} align="l" help="col:Comp">
+                  Comp
+                </SortTh>
+                <SortTh k="Fills" sorter={sorter} help="col:Fills/d">
+                  Fills/d
+                </SortTh>
+                <SortTh k="Net" sorter={sorter} help="col:Net $/h">
+                  Net $/h
+                </SortTh>
+                <SortTh k="Closes" sorter={sorter} align="l" help="sel:Closes">
                   Closes
-                </th>
+                </SortTh>
               </tr>
             </thead>
             <tbody>
-              {s.markets.map((m) => (
+              {sortRows(s.markets, SELECTION_ACCESSORS, sorter.state).map((m) => (
                 <tr key={m.ticker}>
-                  <td className="l am">
+                  <td className="l">
                     <Ticker value={m.ticker} />
                   </td>
                   <td className="l dim">{m.title.slice(0, 28)}</td>
                   <td className="yl">{usd(m.reward_per_day)}</td>
                   <td>{qty(m.target_size)}</td>
                   <td className="pos">{usd(m.est_daily_reward)}</td>
+                  <td className="l">
+                    <CompetitionTag c={m.competition} />
+                  </td>
+                  <td>
+                    <FillsCell r={m} />
+                  </td>
+                  <td>
+                    <NetCell r={m} />
+                  </td>
                   <td className="l dim">
                     {m.close_time ? new Date(m.close_time).toLocaleString([], { hour12: false }) : '—'}
                   </td>

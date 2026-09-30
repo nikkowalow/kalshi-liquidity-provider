@@ -27,15 +27,16 @@ import logging
 import random
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable
-from decimal import Decimal
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Protocol
 
 import httpx
 
 from kalshi_lp.config import Settings
 from kalshi_lp.core.orderbook import Orderbook
-from kalshi_lp.core.types import ZERO, Leg, Quote
+from kalshi_lp.core.types import ZERO, Leg, Quote, Side
 from kalshi_lp.engine import budget
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
 from kalshi_lp.engine.queue import queue_report
@@ -50,8 +51,13 @@ from kalshi_lp.feed.state import MarketState
 from kalshi_lp.feed.stream import StreamingFeed
 from kalshi_lp.journal import JournalLogHandler, NullJournal, RunJournal
 from kalshi_lp.strategy.quoting import LegDecision, MarketContext, QuoteEngine
-from kalshi_lp.strategy.rewards import RewardParams, expected_daily_reward
-from kalshi_lp.strategy.selection import MarketSelector
+from kalshi_lp.strategy.rewards import (
+    Competition,
+    RewardParams,
+    competition,
+    expected_daily_reward,
+)
+from kalshi_lp.strategy.selection import Candidate, MarketSelector
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +73,18 @@ class Feed(Protocol):
     async def start(self, tickers: Iterable[str]) -> None: ...
     async def stop(self) -> None: ...
     async def set_tickers(self, tickers: Iterable[str]) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _Scan:
+    """A market scan's result, ready to adopt."""
+
+    incumbents: dict[str, Decimal]  # markets we had a stake in -> rewards earned there
+    previous: list[str]  # markets being quoted before the scan
+    paused: set[str]
+    candidates: list[Candidate]  # best first
+    kept_paused: list[str]  # paused markets that keep their slot
+    refreshed: list[Market]  # deselected markets we still hold a position in
 
 
 class LiquidityBot:
@@ -88,7 +106,13 @@ class LiquidityBot:
         self.state = feed.state
         self.state.listeners.append(self.journal.listener)
         self.engine = QuoteEngine(settings.quoting, settings.risk.max_position_per_market)
-        self.selector = MarketSelector(client, settings.selection, settings.quoting, self.engine)
+        self.selector = MarketSelector(
+            client,
+            settings.selection,
+            settings.quoting,
+            self.engine,
+            max_capital=settings.risk.max_capital,
+        )
         self.risk = RiskManager(settings.risk)
         self.tracker = RewardTracker()
         self.executor = OrderExecutor(
@@ -111,7 +135,7 @@ class LiquidityBot:
         self.started_at = time.time()
         # Carry the history of earlier runs in this journal (rewards, markets, counters).
         prev = self.journal.previous
-        self.tracker.restore(prev.get("ledger") or {})
+        self.tracker.restore(prev.get("ledger") or {}, prev.get("rewards_unattributed"))
         self.titles: dict[str, str] = {}
         self.fills_total = int(prev.get("fills_total") or 0)
         self._requotes_before = int(prev.get("requotes_total") or 0)
@@ -120,6 +144,11 @@ class LiquidityBot:
         self._config_json = settings.model_dump(mode="json")
         self._group_needs_reset = False
         self._budget_binding = False
+        self._last_exit: dict[str, float] = {}  # ticker -> monotonic time of the last exit order
+        self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
+        self._reselect_soon = False  # a market got paused: re-rank early
+        self._selected: dict[str, Candidate] = {}  # latest selection details per market
+        self._last_reselect = float("-inf")
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
 
@@ -205,10 +234,27 @@ class LiquidityBot:
                     s.risk.max_capital,
                 )
 
+        if s.quoting.size > s.risk.max_position_per_market:
+            log.warning(
+                "quoting.size is %s but risk.max_position_per_market is %s: orders are capped "
+                "at %s contracts. Raise max_position_per_market to quote the full size.",
+                s.quoting.size,
+                s.risk.max_position_per_market,
+                s.risk.max_position_per_market,
+            )
+        group_limit = s.risk.order_group_contracts_limit
+        if not s.dry_run and 0 < group_limit < s.quoting.size:
+            log.warning(
+                "risk.order_group_contracts_limit (%s) is below quoting.size (%s): one full fill "
+                "trips the exchange kill switch and cancels every order. Use about 2 x size.",
+                group_limit,
+                s.quoting.size,
+            )
+
         orphans = self.state.our_orders()
         if orphans:
             log.warning("found %d resting orders from a previous run; cancelling", len(orphans))
-            self._apply(await self.executor.execute(Plan(cancels=orphans)))
+            await self._pull(orphans, "left over from a previous run")
 
         if not s.dry_run and s.risk.order_group_contracts_limit > 0:
             group = await self.client.create_order_group(s.risk.order_group_contracts_limit)
@@ -267,69 +313,133 @@ class LiquidityBot:
 
     async def cancel_all_ours(self) -> None:
         orders = [o for o in await self.client.get_resting_orders() if self.executor.is_ours(o)]
-        if orders:
-            self._apply(await self.executor.execute(Plan(cancels=orders)))
+        await self._pull(orders, "bot shutting down")
         log.info("cancelled %d bot orders", len(orders))
 
     async def sync_from_rest(self) -> None:
         """Replace streamed state with a REST snapshot: the source of truth for drift."""
+        as_of = self.state.now()
         orders = await self.client.get_resting_orders()
         positions = await self.client.get_positions()
         balance = await self.client.get_balance()
-        self.state.replace_orders(o for o in orders if self.executor.is_ours(o))
+        self.state.replace_orders((o for o in orders if self.executor.is_ours(o)), as_of)
         self.state.replace_positions(positions)
         self.state.balance = balance.balance
 
     # -------------------------------------------------------------- selection
 
     async def reselect(self) -> None:
-        candidates = await self.selector.select()
-        chosen = {c.ticker: c for c in candidates}
+        """Scan for the best-paying markets and switch to them."""
+        self._adopt(await self._scan())
 
+    async def _scan(self) -> _Scan:
+        """Rank markets (the slow part: order books and trades over the API).
+
+        Reads state but changes nothing, so it runs without the quoting lock and
+        the bot keeps quoting through a scan.
+        """
+        # Markets we have a stake in: quoting now, or rewards already earned toward the
+        # payout (this session or earlier ones). Selection gives them a small edge.
+        incumbents = {t: s.earned for t, s in self.tracker.stats.items() if s.earned > 0}
+        for ticker in self.markets:
+            if ticker not in self.reduce_only:
+                incumbents.setdefault(ticker, ZERO)
+        previous = [t for t in self.markets if t not in self.reduce_only]
+        # Paused markets sit out this round so their slot can go to a better market.
+        paused = {t for t in previous if self.risk.market_paused(t)}
+        candidates = await self.selector.select(incumbents, exclude=paused)
+        chosen = {c.ticker for c in candidates}
+        # Nothing better to take their slot? Paused markets keep it (resuming after the pause).
+        room = self.settings.selection.max_markets - len(candidates)
+        kept_paused = [t for t in previous if t in paused][: max(room, 0)]
         # Keep deselected markets where we still hold a position, quoting only
         # the side that works the position down.
         leftovers = [
             t
             for t, p in self.state.positions.items()
-            if p.position != 0 and t in self.markets and t not in chosen
+            if p.position != 0 and t in self.markets and t not in chosen and t not in kept_paused
         ]
         refreshed = await self.client.get_markets(tickers=leftovers) if leftovers else []
+        return _Scan(incumbents, previous, paused, candidates, kept_paused, refreshed)
 
-        self.markets = {c.ticker: c.market for c in candidates}
+    def _adopt(self, scan: _Scan) -> None:
+        """Switch to the markets a scan picked. Quick and synchronous: call under the lock."""
+        candidates = scan.candidates
+        before = dict(self._selected)
+        old_markets, old_rewards = self.markets, self.rewards
+        self.markets = {c.ticker: c.market for c in candidates}  # best first: capital order
         self.rewards = {c.ticker: c.reward for c in candidates}
+        for ticker in scan.kept_paused:
+            if ticker in old_markets:
+                self.markets[ticker] = old_markets[ticker]
+                self.rewards[ticker] = old_rewards.get(ticker, self.selector.default_reward())
         self.reduce_only = set()
-        for market in refreshed:
+        for market in scan.refreshed:
             if market.is_tradable:
                 self.markets[market.ticker] = market
                 self.rewards[market.ticker] = self.selector.default_reward()
                 self.reduce_only.add(market.ticker)
-
-        self.journal.event(
-            "markets",
-            markets=[
-                {
-                    "ticker": c.ticker,
-                    "title": c.market.title,
-                    "reward_per_day": c.reward.reward_per_day,
-                    "target_size": c.reward.target_size,
-                    "discount_factor": c.reward.discount_factor,
-                    "est_daily_reward": c.est_daily_reward,
-                    "close_time": c.market.close_time,
-                }
-                for c in candidates
-            ],
-            reduce_only=sorted(self.reduce_only),
-        )
-        log.info("selected %d markets:", len(candidates))
         for c in candidates:
-            log.info(
-                "  %-44s est $%.2f/day  (program $%.2f/day, target %s, df %s)",
-                c.ticker,
-                c.est_daily_reward,
-                c.reward.reward_per_day,
-                f"{c.reward.target_size.normalize():f}",
-                c.reward.discount_factor,
+            self._selected[c.ticker] = c
+
+        changed = [c.ticker for c in candidates] != [
+            t for t in scan.previous if t not in scan.paused
+        ]
+        if changed or not scan.previous:  # the dashboard's live figures come from snapshots
+            self.journal.event(
+                "markets",
+                markets=[
+                    {
+                        "ticker": c.ticker,
+                        "title": c.market.title,
+                        "reward_per_day": c.reward.reward_per_day,
+                        "target_size": c.reward.target_size,
+                        "discount_factor": c.reward.discount_factor,
+                        "est_daily_reward": c.est_daily_reward,
+                        "close_time": c.market.close_time,
+                        "competition": _competition_json(c.competition),
+                        "size": c.size,
+                        **_fill_risk_json(c),
+                    }
+                    for c in candidates
+                ],
+                reduce_only=sorted(self.reduce_only),
             )
+            log.info("selected %d markets (best $/h first):", len(candidates))
+            for c in candidates:
+                log.info(
+                    "  %-44s $%.3f/h net  (est $%.2f/day at %s/side%s; program $%.2f/day, "
+                    "target %s, %s)%s",
+                    c.ticker,
+                    c.net_daily_reward / 24,
+                    c.est_daily_reward,
+                    f"{c.size.normalize():f}",
+                    _fill_risk_text(c),
+                    c.reward.reward_per_day,
+                    f"{c.reward.target_size.normalize():f}",
+                    _competition_text(c.competition),
+                    _stake_text(c, scan.incumbents),
+                )
+        else:
+            log.info(
+                "scan: still in the best markets (%s)",
+                ", ".join(f"{c.ticker} ${c.net_daily_reward / 24:.3f}/h" for c in candidates),
+            )
+        for ticker in scan.kept_paused:
+            log.info("  %-44s paused; keeps its slot (no better market found)", ticker)
+        for ticker in scan.previous:
+            if ticker not in self.markets:
+                earned = scan.incumbents.get(ticker, ZERO)
+                last = before.get(ticker)
+                rate = f", ${last.net_daily_reward / 24:.3f}/h at its last scan" if last else ""
+                why = (
+                    "paused, and a better market took its slot"
+                    if ticker in scan.paused
+                    else "a better-paying market took its slot (or it no longer passes filters)"
+                )
+                log.warning(
+                    "switched out of %s ($%.2f earned there%s): %s", ticker, earned, rate, why
+                )
         if self.reduce_only:
             log.info("reduce-only (holding inventory): %s", ", ".join(sorted(self.reduce_only)))
 
@@ -353,6 +463,8 @@ class LiquidityBot:
                 tickers |= set(self.markets)
                 last_full = now
             tickers |= {o.ticker for o in self.state.our_orders()} - set(self.markets)
+            if self.settings.risk.flatten_on_fill:
+                tickers |= {t for t in self.markets if self.state.position(t) != 0}
             if not tickers:
                 continue
 
@@ -384,12 +496,12 @@ class LiquidityBot:
         """Recompute and send quotes for ``tickers``. Caller holds ``self._lock``."""
         tickers = sorted(tickers)
         if not self.trading_active:
-            await self._pull(self.state.our_orders())
+            await self._pull(self.state.our_orders(), "exchange trading is closed")
             return
         view = self._risk_view()
         self._last_view = view
         if view.halted:
-            await self._pull(self.state.our_orders())
+            await self._pull(self.state.our_orders(), f"risk halt: {self.risk.halt_reason}")
             self.stop()
             return
         if self._group_needs_reset and not view.globally_paused and self.executor.order_group_id:
@@ -398,57 +510,72 @@ class LiquidityBot:
             log.info("order group reset; resuming")
 
         plan = Plan()
+        self._sizes = self._auto_sizes()
+        paused_before = {t for t in self.markets if self.risk.market_paused(t)}
         for ticker in tickers:
             own = self.state.our_orders(ticker)
+            if self._flatten(ticker, own, plan):
+                continue
             decisions = self._decide(ticker, view)
-            if decisions is None:
-                plan.cancels += own
+            if isinstance(decisions, str):
+                plan.cancel(own, decisions)
                 self._desired.pop(ticker, None)
                 self._decisions.pop(ticker, None)  # dashboard: no stale quotes on paused markets
                 continue
             quotes = [d.quote for d in decisions.values() if d.quote]
             self._note_quotes(ticker, decisions, quotes)
             if not self.settings.dry_run:
-                plan.extend(reconcile(quotes, own))
+                plan.extend(reconcile(quotes, own, reasons=_side_reasons(decisions)))
 
+        if self.settings.loop.reselect_on_pause and any(
+            self.risk.market_paused(t) for t in set(self.markets) - paused_before
+        ):
+            self._reselect_soon = True  # a slot just froze: look for a better market
         if plan.creates and self.settings.risk.max_capital is not None:
             self._fit_budget(plan, self.settings.risk.max_capital)
         if not plan:
             return
         report = await self.executor.execute(plan)
-        self._apply(report)
+        self._apply(report, plan)
         self.risk.record_cycle(report.errors == 0)
         if report.group_blocked:
             self.risk.pause_all("exchange order group tripped (fill limit hit)")
             self._group_needs_reset = True
         log.info(
             "requote %s: pnl=%+.2f capital=$%.2f | cancel=%d decrease=%d place=%d "
-            "rejected=%d errors=%d",
+            "exit=%d rejected=%d errors=%d",
             ",".join(tickers) if len(tickers) <= 3 else f"{len(tickers)} markets",
             view.session_pnl,
             self.capital_in_use(),
             report.cancelled,
             report.decreased,
             report.created,
+            len(report.exited),
             report.rejected,
             report.errors,
         )
 
-    def _decide(self, ticker: str, view: RiskView) -> dict[Leg, LegDecision] | None:
-        """Quotes for one market, or None if the market must not be quoted right now."""
+    def _decide(self, ticker: str, view: RiskView) -> dict[Leg, LegDecision] | str:
+        """Quotes for one market, or the reason it must not be quoted right now."""
         market = self.markets.get(ticker)
         book = self.state.book(ticker)
-        if (
-            market is None
-            or book is None
-            or not self.feed.connected
-            or view.globally_paused
-            or self.risk.market_paused(ticker)
-            or self.risk.near_close(market)
-        ):
-            return None
+        if market is None:
+            return "market no longer selected"
+        if not self.feed.connected:
+            return "market data feed disconnected"
+        if book is None:
+            return "order book not trusted (waiting for a fresh snapshot)"
+        if view.globally_paused:
+            return f"all quoting paused: {self.risk.global_pause_reason}"
+        if self.risk.market_paused(ticker):
+            return f"market paused: {self.risk.pause_reasons.get(ticker, 'risk limit')}"
+        if self.risk.near_close(market):
+            hours = self.settings.risk.close_buffer_seconds / 3600
+            return f"market closes within {hours:g}h"
         if self._moved_too_fast(ticker, book.mid):
-            return None
+            return f"market paused: {self.risk.pause_reasons.get(ticker, 'price moved fast')}"
+        if self._sizes.get(ticker) == 0:
+            return "no capital left: higher-paying markets use the budget"
         orders = self.state.our_orders(ticker)
         own = own_orders_by_leg(orders, self.state.queue_ahead)
         resting = {leg: max(os, key=lambda o: o.size) for leg, os in own.items() if os}
@@ -465,11 +592,90 @@ class LiquidityBot:
             allow_increase=view.allow_increase and ticker not in self.reduce_only,
             resting=resting,
             resting_age=ages,
+            size=self._sizes.get(ticker),
         )
         decisions = self.engine.quote(ctx)
         self._desired[ticker] = [d.quote for d in decisions.values() if d.quote]
         self._decisions[ticker] = decisions
         return decisions
+
+    def _flatten(self, ticker: str, own: list[Order], plan: Plan) -> bool:
+        """Never hold shares: if ``ticker`` has a position, pull its quotes and exit now.
+
+        Returns True when the market is being flattened (skip normal quoting).
+        Runs before the pause checks on purpose: a fill often triggers a pause,
+        and the position must still be closed.
+        """
+        risk = self.settings.risk
+        position = self.state.position(ticker)
+        if not risk.flatten_on_fill or position == 0:
+            return False
+        plan.cancel(own, f"flatten: holding {position:+f} contracts")
+        self._desired.pop(ticker, None)
+        self._decisions.pop(ticker, None)
+        now = time.monotonic()
+        if now - self._last_exit.get(ticker, float("-inf")) < risk.flatten_retry_seconds:
+            return True  # an exit just went out; wait for its fills to arrive
+        book = self.state.book(ticker)
+        market = self.markets.get(ticker)
+        grid = market.grid if market else None
+        if position > 0:  # long YES: sell into the best YES bid
+            best = book.best_yes_bid if book else None
+            price = None if best is None else max(best - risk.flatten_slippage, Decimal("0.01"))
+            side = Side.ASK
+        else:  # long NO: buy YES from the best YES ask
+            best = book.best_yes_ask if book else None
+            price = None if best is None else min(best + risk.flatten_slippage, Decimal("0.99"))
+            side = Side.BID
+        if price is None:
+            log.warning("%s: can't flatten %s, no price on the other side", ticker, position)
+            return True
+        if grid is not None:
+            price = grid.round_down(price) if side is Side.ASK else grid.round_up(price)
+        quote = Quote(ticker, side, price, abs(position))
+        plan.exits.append(quote)
+        plan.why[(ticker, side, price)] = (
+            f"flatten {position:+f} filled contracts (best {best}, limit {price})"
+        )
+        self._last_exit[ticker] = now
+        return True
+
+    def _auto_sizes(self) -> dict[str, Decimal]:
+        """Per-market size that puts the capital budget to work (quoting.auto_size)."""
+        q, cap = self.settings.quoting, self.settings.risk.max_capital
+        if not q.auto_size or cap is None:
+            return {}
+        active = [
+            t
+            for t, m in self.markets.items()
+            if t not in self.reduce_only
+            and not self.risk.market_paused(t)
+            and not self.risk.near_close(m)
+            and self.state.book(t) is not None
+        ]
+        if not active:
+            return {}
+        in_positions = self.capital_in_use(excluding=self.state.our_orders())
+        remaining = max(cap - in_positions, ZERO) * q.capital_utilization
+        limit = self.settings.risk.max_position_per_market
+        if q.max_size is not None:
+            limit = min(limit, q.max_size)
+        # Best market first (self.markets is in selection order): each gets full size
+        # until the budget runs out. Rewards scale with size, so this beats an even split.
+        sizes: dict[str, Decimal] = {}
+        for ticker in active:
+            book = self.state.book(ticker)
+            if book is None or book.best_yes_bid is None or book.best_yes_ask is None:
+                continue
+            # A YES bid at the best bid plus a NO bid at 1 - best ask: an upper bound on
+            # what one contract per side locks (our quotes usually rest deeper, cheaper).
+            pair = book.best_yes_bid + (1 - book.best_yes_ask)
+            if pair <= 0:
+                continue
+            size = min((remaining / pair).to_integral_value(rounding=ROUND_FLOOR), limit)
+            sizes[ticker] = max(size, ZERO)
+            remaining -= sizes[ticker] * pair
+        return sizes
 
     def _moved_too_fast(self, ticker: str, mid: Decimal | None) -> bool:
         """Move guard: pause a market whose mid moved ``max_mid_move`` within the window."""
@@ -548,6 +754,12 @@ class LiquidityBot:
         live = {q.ticker: self.state.position(q.ticker) for q in plan.creates}
         wanted = plan.creates
         plan.creates, _ = budget.fit_to_budget(wanted, max_capital - in_use, live)
+        before = {(q.ticker, q.side, q.price): q.size for q in wanted}
+        for q in plan.creates:
+            key = (q.ticker, q.side, q.price)
+            if q.size < before.get(key, q.size):
+                note = f"shrunk {before[key]:f} -> {q.size:f} to fit max_capital"
+                plan.why[key] = f"{plan.why[key]}; {note}" if plan.why.get(key) else note
         binding = plan.creates != wanted
         if binding and not self._budget_binding:
             log.warning(
@@ -557,21 +769,42 @@ class LiquidityBot:
             )
         self._budget_binding = binding
 
-    async def _pull(self, orders: list[Order]) -> None:
+    async def _pull(self, orders: list[Order], reason: str) -> None:
         if orders:
-            self._apply(await self.executor.execute(Plan(cancels=orders)))
+            plan = Plan()
+            plan.cancel(orders, reason)
+            self._apply(await self.executor.execute(plan), plan)
 
-    def _apply(self, report: ExecutionReport) -> None:
+    def _apply(self, report: ExecutionReport, plan: Plan) -> None:
         """Reflect REST results in live state right away (the stream confirms later)."""
         for order in report.gone:
             self.state.remove_order(order.order_id, order.ticker)
-            self.journal.event("order", action="cancel", **_order_json(order))
+            self.journal.event(
+                "order", action="cancel", reason=plan.reason_for_order(order), **_order_json(order)
+            )
         for order in report.placed:
             self.state.upsert_order(order)
-            self.journal.event("order", action="place", **_order_json(order))
+            why = plan.reason_for_quote(order.ticker, order.side, order.yes_price)
+            self.journal.event("order", action="place", reason=why, **_order_json(order))
         for order in report.resized:
             self.state.upsert_order(order)
-            self.journal.event("order", action="decrease", **_order_json(order))
+            self.journal.event(
+                "order",
+                action="decrease",
+                reason=plan.reason_for_order(order),
+                **_order_json(order),
+            )
+        for quote, filled in report.exited:
+            self.journal.event(
+                "order",
+                action="exit",
+                ticker=quote.ticker,
+                side=quote.side.value,
+                price=quote.price,
+                size=quote.size,
+                filled=filled,
+                reason=plan.reason_for_quote(quote.ticker, quote.side, quote.price),
+            )
         for quote, error in report.rejections:
             self.journal.event(
                 "order",
@@ -581,6 +814,7 @@ class LiquidityBot:
                 price=quote.price,
                 size=quote.size,
                 error=error,
+                reason=plan.reason_for_quote(quote.ticker, quote.side, quote.price),
             )
 
     # ------------------------------------------------------------- maintenance
@@ -599,6 +833,15 @@ class LiquidityBot:
         while not self.stopping:
             await self._sleep(1.0)
             now = time.monotonic()
+            gap = self.settings.loop.min_reselect_gap_seconds
+            if self._reselect_soon and now - self._last_reselect >= gap:
+                self._reselect_soon = False
+                last[self._reselect_job] = now  # counts as the scheduled one too
+                log.info("a market was paused; re-ranking early to use its slot")
+                try:
+                    await self._reselect_job()
+                except TRANSIENT_ERRORS as exc:
+                    log.warning("reselect failed: %s", exc)
             for interval, job in jobs:
                 if now - last[job] >= interval:
                     last[job] = now
@@ -615,7 +858,7 @@ class LiquidityBot:
             self.trading_active = active
             if not active:
                 async with self._lock:
-                    await self._pull(self.state.our_orders())
+                    await self._pull(self.state.our_orders(), "exchange trading is closed")
             self.state.changed.set()
 
     async def _reconcile(self) -> None:
@@ -628,8 +871,10 @@ class LiquidityBot:
             self.state.queue_ahead = await self.client.get_queue_positions(tickers)
 
     async def _reselect_job(self) -> None:
+        self._last_reselect = time.monotonic()
+        scan = await self._scan()  # no lock: the bot keeps quoting during the scan
         async with self._lock:
-            await self.reselect()
+            self._adopt(scan)
         await self.feed.set_tickers(self.markets)
         self.state.changed.set()
 
@@ -684,6 +929,13 @@ class LiquidityBot:
                     "close_time": market.close_time if market else None,
                     "reduce_only": ticker in self.reduce_only,
                     "paused": self.risk.market_paused(ticker),
+                    "pause_reason": self.risk.pause_reasons.get(ticker)
+                    if self.risk.market_paused(ticker)
+                    else None,
+                    "pause_left": self.risk.pause_left(ticker),
+                    "flattening": self.settings.risk.flatten_on_fill
+                    and self.state.position(ticker) != 0,
+                    "size": self._sizes.get(ticker),
                     "near_close": bool(market and self.risk.near_close(market)),
                     "healthy": self.state.is_healthy(ticker),
                     "book": _book_json(book),
@@ -697,6 +949,23 @@ class LiquidityBot:
                         "target_size": params.target_size if params else None,
                         "discount_factor": params.discount_factor if params else None,
                     },
+                    "competition": _competition_json(
+                        competition(
+                            strip_own(
+                                book,
+                                own_orders_by_leg(
+                                    self.state.our_orders(ticker), self.state.queue_ahead
+                                ),
+                            ),
+                            params,
+                        )
+                        if book is not None and params is not None
+                        else None
+                    ),
+                    **(_fill_risk_json(self._selected[ticker]) if ticker in self._selected else {}),
+                    "est_daily_reward": self._selected[ticker].est_daily_reward
+                    if ticker in self._selected
+                    else None,
                     "earned": stats.earned if stats else 0,
                     "rate_per_hour": stats.hourly_rate(now) if stats else 0,
                     "avg_score": stats.avg_score if stats else 0,
@@ -738,6 +1007,7 @@ class LiquidityBot:
             "config": self._config_json,
             # Persisted for the next run (see RunJournal.previous).
             "ledger": self.tracker.ledger(self.titles),
+            "rewards_unattributed": self.tracker.unattributed,
             "fills_total": self.fills_total,
             "requotes_total": self._requotes_before + self.requotes,
         }
@@ -815,6 +1085,58 @@ def _order_json(o: Order) -> dict[str, Any]:
         "price": o.yes_price,
         "size": o.remaining,
     }
+
+
+def _side_reasons(decisions: dict[Leg, LegDecision]) -> dict[Side, str]:
+    """The strategy's reason per order side, e.g. "reward, share 1.3%" or "position limit"."""
+    out = {}
+    for leg, d in decisions.items():
+        text = d.reason
+        if d.quote is not None and d.score is not None:
+            text += f", share {d.score.share:.1%}"
+        out[leg.order_side] = text
+    return out
+
+
+def _fill_risk_json(c: Candidate) -> dict[str, Any]:
+    risk = c.fill_risk
+    return {
+        "est_fills_per_day": risk.fills_per_day if risk else None,
+        "fill_cost_per_day": risk.cost_per_day if risk else None,
+        "net_daily_reward": c.net_daily_reward if risk else None,
+    }
+
+
+def _fill_risk_text(c: Candidate) -> str:
+    risk = c.fill_risk
+    if risk is None:
+        return ""
+    if not risk.fills_per_day:
+        return ", no sweeps would reach us"
+    return (
+        f", fills ~{risk.fills_per_day:.0f}/day cost ${risk.cost_per_day:.2f}"
+        f" -> net ${c.net_daily_reward:.2f}/day"
+    )
+
+
+def _stake_text(c: Candidate, incumbents: Mapping[str, Decimal]) -> str:
+    if c.ticker not in incumbents:
+        return "  [new]"
+    kept = f"  [kept; ${c.earned:.2f} earned"
+    if c.unpaid_bonus:
+        kept += f", +${c.unpaid_bonus:.2f}/day for unpaid earnings"
+    return kept + "]"
+
+
+def _competition_json(comp: Competition | None) -> dict[str, Any] | None:
+    return None if comp is None else {"level": comp.level, "room": comp.room}
+
+
+def _competition_text(comp: Competition | None) -> str:
+    if comp is None:
+        return "competition ?"
+    room = "Target Size not reached" if comp.room is None else f"room {comp.room * 100:.0f}c"
+    return f"competition {comp.level}, {room}"
 
 
 def _book_json(book: Orderbook | None) -> dict[str, Any] | None:

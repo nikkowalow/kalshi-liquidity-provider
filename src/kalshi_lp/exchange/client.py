@@ -24,6 +24,7 @@ from kalshi_lp.exchange.models import (
     Market,
     Order,
     Position,
+    Trade,
 )
 from kalshi_lp.exchange.rate_limit import Bucket, RateLimiter
 
@@ -239,6 +240,25 @@ class KalshiClient:
                 log.debug("skipping malformed incentive program %s: %s", raw.get("id"), exc)
         return programs
 
+    async def get_trades(
+        self, ticker: str, *, min_ts: float | None = None, max_items: int = 5000
+    ) -> list[Trade]:
+        """Public trades in ``ticker`` since ``min_ts`` (unix seconds), newest first.
+
+        Stops after ``max_items``; a caller that gets that many should treat the
+        history as covering only back to the oldest trade returned.
+        """
+        params: dict[str, Any] = {"ticker": ticker, "limit": min(max_items, 1000)}
+        if min_ts is not None:
+            params["min_ts"] = int(min_ts)
+        trades = []
+        async for raw in self._paginate("/markets/trades", "trades", params, max_items=max_items):
+            try:
+                trades.append(Trade.from_api(raw))
+            except (KeyError, ValueError) as exc:
+                log.debug("skipping malformed trade %s: %s", raw.get("trade_id"), exc)
+        return trades
+
     # --------------------------------------------------------------- portfolio
 
     async def get_balance(self) -> Balance:
@@ -281,14 +301,20 @@ class KalshiClient:
     # ------------------------------------------------------------------ orders
 
     def _order_body(
-        self, quote: Quote, client_order_id: str, *, post_only: bool, order_group_id: str | None
+        self,
+        quote: Quote,
+        client_order_id: str,
+        *,
+        post_only: bool,
+        order_group_id: str | None,
+        time_in_force: str = "good_till_canceled",
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "ticker": quote.ticker,
             "side": quote.side.value,
             "price": fmt_price(quote.price),
             "count": fmt_count(quote.size),
-            "time_in_force": "good_till_canceled",
+            "time_in_force": time_in_force,
             "self_trade_prevention_type": "taker_at_cross",
             "post_only": post_only,
             "cancel_order_on_pause": True,
@@ -306,9 +332,14 @@ class KalshiClient:
         *,
         post_only: bool = True,
         order_group_id: str | None = None,
+        time_in_force: str = "good_till_canceled",
     ) -> OrderResult:
         body = self._order_body(
-            quote, client_order_id, post_only=post_only, order_group_id=order_group_id
+            quote,
+            client_order_id,
+            post_only=post_only,
+            order_group_id=order_group_id,
+            time_in_force=time_in_force,
         )
         data = await self._request(
             "POST",

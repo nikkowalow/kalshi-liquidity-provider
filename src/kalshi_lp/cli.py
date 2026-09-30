@@ -66,7 +66,13 @@ def build_client(settings: Settings, signer: Signer | None = None) -> KalshiClie
 
 def build_selector(settings: Settings, client: KalshiClient) -> MarketSelector:
     engine = QuoteEngine(settings.quoting, settings.risk.max_position_per_market)
-    return MarketSelector(client, settings.selection, settings.quoting, engine)
+    return MarketSelector(
+        client,
+        settings.selection,
+        settings.quoting,
+        engine,
+        max_capital=settings.risk.max_capital,
+    )
 
 
 def public_client(settings: Settings) -> KalshiClient:
@@ -108,12 +114,24 @@ async def cmd_markets(settings: Settings, _: argparse.Namespace) -> int:
     if not candidates:
         print("No markets passed the selection filters.")
         return 1
-    print(f"{'TICKER':<44} {'BID':>6} {'ASK':>6} {'VOL24H':>10} {'PROGRAM/DAY':>12} {'EST/DAY':>9}")
+    print(
+        f"{'TICKER':<44} {'BID':>6} {'ASK':>6} {'VOL24H':>10} {'PROGRAM/DAY':>12} "
+        f"{'EST/DAY':>9} {'FILLS/DAY':>10} {'FILL $/DAY':>11} {'NET/DAY':>9}"
+    )
     for c in candidates:
-        m = c.market
+        m, risk = c.market, c.fill_risk
+        fills = f"{risk.fills_per_day:>10.1f}" if risk else f"{'-':>10}"
+        cost = f"{risk.cost_per_day:>11.2f}" if risk else f"{'-':>11}"
         print(
             f"{m.ticker:<44} {m.yes_bid or '-':>6} {m.yes_ask or '-':>6} "
-            f"{m.volume_24h:>10.0f} {c.reward.reward_per_day:>12.2f} {c.est_daily_reward:>9.2f}"
+            f"{m.volume_24h:>10.0f} {c.reward.reward_per_day:>12.2f} {c.est_daily_reward:>9.2f} "
+            f"{fills} {cost} {c.net_daily_reward:>9.2f}"
+        )
+    if any(c.fill_risk for c in candidates):
+        print(
+            "\nFILLS/DAY: contracts of ours that recent sweeps would have filled (replaying "
+            f"{settings.selection.trade_lookback_hours:g}h of public trades).\nFILL $/DAY: their "
+            "cost (taker fee to exit + adverse move). NET = EST - FILL $."
         )
     return 0
 

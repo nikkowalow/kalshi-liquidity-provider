@@ -47,3 +47,10 @@ export function duration(seconds: number): string {
   const m = Math.floor((s % 3600) / 60)
   return `${h}h${String(m).padStart(2, '0')}m${String(s % 60).padStart(2, '0')}s`
 }
+
+/** CSS class for a YES-terms order side: bids green, asks red. */
+export const sideClass = (side: string | null | undefined): string =>
+  side === 'bid' ? 'bid' : side === 'ask' ? 'ask' : ''
+
+/** CSS class for an activity kind (place, cancel, fill, quote, ...). */
+export const kindClass = (kind: string): string => `k-${kind}`

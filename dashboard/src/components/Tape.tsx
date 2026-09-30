@@ -1,19 +1,13 @@
 import { useMemo } from 'react'
 import type { Journal } from '../lib/useJournal'
-import { hms, px, qty } from '../lib/format'
+import { hms, kindClass, px, qty, sideClass } from '../lib/format'
 
 interface TapeItem {
   key: string
   ts: number
   cls: string
   text: string
-}
-
-const KIND_CLASS: Record<string, string> = {
-  place: 'cy',
-  cancel: 'dim',
-  decrease: 'yl',
-  reject: 'neg',
+  trade?: { ticker: string; side: string; size: string; reason?: string } // colored separately
 }
 
 /** Scrolling ticker of the latest bot activity: fills, orders, and warnings. */
@@ -24,16 +18,18 @@ export function Tape({ journal }: { journal: Journal }) {
       out.push({
         key: `f${f.ts}${f.order_id}`,
         ts: f.ts,
-        cls: 'mg',
-        text: `FILL ${f.ticker} ${(f.side ?? '').toUpperCase()} ${qty(f.count)}@${px(f.price)}`,
+        cls: kindClass('fill'),
+        text: 'FILL',
+        trade: { ticker: f.ticker, side: f.side ?? '', size: `${qty(f.count)}@${px(f.price)}` },
       })
     }
     for (const o of journal.orders.slice(-30)) {
       out.push({
         key: `o${o.ts}${o.order_id ?? o.ticker}${o.action}`,
         ts: o.ts,
-        cls: KIND_CLASS[o.action] ?? '',
-        text: `${o.action.toUpperCase()} ${o.ticker} ${o.side.toUpperCase()} ${qty(o.size)}@${px(o.price)}`,
+        cls: kindClass(o.action),
+        text: o.action.toUpperCase(),
+        trade: { ticker: o.ticker, side: o.side, size: `${qty(o.size)}@${px(o.price)}`, reason: o.reason },
       })
     }
     for (const l of journal.logs.slice(-200)) {
@@ -47,8 +43,18 @@ export function Tape({ journal }: { journal: Journal }) {
   if (!items.length) return <div className="tape" data-help="panel:tape" />
   const run = (copy: string) =>
     items.map((i) => (
-      <span key={`${copy}${i.key}`} className={`tape-item ${i.cls}`}>
-        <span className="dim">{hms(i.ts)}</span> {i.text}
+      <span key={`${copy}${i.key}`} className="tape-item">
+        <span className="dim">{hms(i.ts)}</span> <span className={i.cls}>{i.text}</span>
+        {i.trade && (
+          <>
+            {' '}
+            <span className="tk">{i.trade.ticker}</span>{' '}
+            <span className={sideClass(i.trade.side)}>
+              {i.trade.side.toUpperCase()} {i.trade.size}
+            </span>
+            {i.trade.reason && <span className="dim"> — {i.trade.reason}</span>}
+          </>
+        )}
       </span>
     ))
   return (

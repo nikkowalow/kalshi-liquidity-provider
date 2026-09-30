@@ -242,3 +242,130 @@ async def test_cushion_config_flows_through_bot(exchange: FakeExchange) -> None:
     bot, feed = await started(exchange, quoting={"min_cushion": 200, "default_target_size": 1000})
     await step(bot, feed)
     assert not exchange.orders
+
+
+# ------------------------------------------------------------ never hold shares
+
+
+async def test_fill_is_flattened_immediately(exchange: FakeExchange) -> None:
+    bot, feed = await started(
+        exchange,
+        risk={"flatten_on_fill": True, "fill_burst_contracts": 5, "flatten_retry_seconds": 0.01},
+    )
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    exchange.fill(bid.order_id, D(10))  # bought 10 YES at 0.40
+    await step(bot, feed)
+    # Quotes pulled and an exit sells 10 YES into the best bid (0.40), up to 2c through it.
+    [exit_] = exchange.exits
+    assert (exit_.side, exit_.price, exit_.size) == (Side.ASK, D("0.38"), D(10))
+    assert not exchange.orders
+    assert exchange.positions[T].position == 0
+    # A fill of 10 >= fill_burst_contracts pauses the market, so it stays dark (but flat).
+    assert bot.risk.market_paused(T)
+    await step(bot, feed)
+    assert len(exchange.exits) == 1  # flat now: no more exits
+
+
+async def test_flatten_works_while_paused_and_short(exchange: FakeExchange) -> None:
+    bot, feed = await started(exchange, risk={"flatten_on_fill": True})
+    await step(bot, feed)
+    ask = next(o for o in exchange.orders.values() if o.side is Side.ASK)
+    exchange.fill(ask.order_id, D(10))  # sold 10 YES (= long 10 NO)
+    bot.risk.pause_market(T, "test pause")
+    await step(bot, feed)
+    [exit_] = exchange.exits
+    assert (exit_.side, exit_.price) == (Side.BID, D("0.52"))  # buy back at best ask 0.50 + 2c
+    assert exchange.positions[T].position == 0
+
+
+async def test_auto_size_spends_the_budget(exchange: FakeExchange) -> None:
+    # Book 0.40 / 0.50: a contract per side locks at most 0.40 + 0.50 = $0.90.
+    bot, feed = await started(
+        exchange,
+        quoting={"auto_size": True, "capital_utilization": 1},
+        risk={"max_capital": 18, "max_position_per_market": 100},
+    )
+    await step(bot, feed)
+    assert {o.remaining for o in exchange.orders.values()} == {D(20)}  # $18 / $0.90
+    assert bot.capital_in_use() <= 18
+    capped, feed2 = await started(
+        FakeExchange([make_market(T)], {T: exchange.books[T]}),
+        quoting={"auto_size": True, "max_size": 7},
+        risk={"max_capital": 18},
+    )
+    await step(capped, feed2)
+    assert {o.remaining for o in capped.executor.client.orders.values()} == {D(7)}  # type: ignore[attr-defined]
+
+
+async def test_paused_market_slot_goes_to_the_next_best_market() -> None:
+    book = make_book(yes=[("0.40", 15), ("0.38", 100)], no=[("0.50", 15), ("0.48", 100)])
+    ex = FakeExchange([make_market("AAA-1"), make_market("BBB-1")], {"AAA-1": book, "BBB-1": book})
+    ex.programs = [program("AAA-1"), program("BBB-1")]
+    bot, _ = await started(ex, selection={"mode": "incentives", "max_markets": 1})
+    first = next(iter(bot.markets))
+    other = ({"AAA-1", "BBB-1"} - {first}).pop()
+    bot.risk.pause_market(first, "test pause")
+    await bot.reselect()
+    assert list(bot.markets) == [other]  # the free slot went to the other market
+
+
+async def test_paused_market_keeps_its_slot_when_nothing_better_exists(
+    exchange: FakeExchange,
+) -> None:
+    exchange.programs = [program()]
+    bot, _ = await started(exchange, selection={"mode": "incentives", "max_markets": 1})
+    bot.risk.pause_market(T, "test pause")
+    await bot.reselect()
+    assert list(bot.markets) == [T]  # not forced out: resumes when the pause ends
+
+
+# ------------------------------------------------------- scanning for better markets
+
+
+async def test_market_scan_runs_without_blocking_quoting(exchange: FakeExchange) -> None:
+    bot, _ = await started(exchange)
+    locked_during_scan = []
+    real_select = bot.selector.select
+
+    async def watching_select(*args, **kwargs):
+        locked_during_scan.append(bot._lock.locked())
+        return await real_select(*args, **kwargs)
+
+    bot.selector.select = watching_select  # type: ignore[method-assign]
+    await bot._reselect_job()
+    assert locked_during_scan == [False]
+
+
+async def test_capital_fills_the_best_market_first() -> None:
+    book = make_book(yes=[("0.40", 15), ("0.38", 100)], no=[("0.50", 15), ("0.48", 100)])
+    ex = FakeExchange([make_market("AAA-1"), make_market("BBB-1")], {"AAA-1": book, "BBB-1": book})
+    # A contract per side locks at most 0.40 + 0.50 = $0.90: $13.50 = 10 + 5 contracts.
+    bot, feed = await started(
+        ex,
+        selection={"tickers": ["AAA-1", "BBB-1"], "max_markets": 2},
+        quoting={"auto_size": True, "max_size": 10, "capital_utilization": 1},
+        risk={"max_capital": "13.5"},
+    )
+    await step(bot, feed)
+    first, second = bot.markets  # selection order: best first
+    assert bot._sizes == {first: D(10), second: D(5)}
+    sizes = {(o.ticker, o.remaining) for o in ex.orders.values()}
+    assert sizes == {(first, D(10)), (second, D(5))}
+
+
+async def test_market_without_capital_left_is_not_quoted() -> None:
+    book = make_book(yes=[("0.40", 15), ("0.38", 100)], no=[("0.50", 15), ("0.48", 100)])
+    ex = FakeExchange([make_market("AAA-1"), make_market("BBB-1")], {"AAA-1": book, "BBB-1": book})
+    bot, feed = await started(
+        ex,
+        selection={"tickers": ["AAA-1", "BBB-1"], "max_markets": 2},
+        quoting={"auto_size": True, "max_size": 10, "capital_utilization": 1},
+        risk={"max_capital": 9},
+    )
+    await step(bot, feed)
+    first, second = bot.markets
+    assert {o.ticker for o in ex.orders.values()} == {first}
+    assert bot._decide(second, bot._risk_view()) == (
+        "no capital left: higher-paying markets use the budget"
+    )

@@ -109,6 +109,7 @@ class RewardTracker:
         self.stats: dict[str, MarketRewardStats] = {}
         self.started = clock()
         self._carried = ZERO  # earned by earlier runs (see restore)
+        self.unattributed = ZERO  # earlier runs' earnings not tied to a market
         self._sampled: set[str] = set()  # markets scored this run
 
     def record(self, ticker: str, score: Decimal, params: RewardParams) -> Decimal:
@@ -126,8 +127,9 @@ class RewardTracker:
             stats.last_earned_at = time.time()
         return earned
 
-    def restore(self, ledger: Mapping[str, Mapping[str, Any]]) -> None:
+    def restore(self, ledger: Mapping[str, Mapping[str, Any]], unattributed: object = 0) -> None:
         """Load per-market totals saved by earlier runs (see :meth:`ledger`)."""
+        self.unattributed = Decimal(str(unattributed or 0))
         for ticker, d in ledger.items():
             stats = self.stats.setdefault(ticker, MarketRewardStats())
             stats.snapshots += int(d.get("snapshots") or 0)
@@ -171,7 +173,7 @@ class RewardTracker:
 
     @property
     def total_earned(self) -> Decimal:
-        return sum((s.earned for s in self.stats.values()), ZERO)
+        return sum((s.earned for s in self.stats.values()), self.unattributed)
 
     @property
     def session_earned(self) -> Decimal:

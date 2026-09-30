@@ -94,6 +94,8 @@ class RiskManager:
         self.halt_reason = ""
         self._pause_until = 0.0
         self._market_pause_until: dict[str, float] = {}
+        self.pause_reasons: dict[str, str] = {}  # ticker -> why it is paused
+        self.global_pause_reason = ""
         self._consecutive_errors = 0
         self._baseline: dict[str, Decimal] = {}
         self._last_pnl: dict[str, Decimal] = {}
@@ -119,6 +121,7 @@ class RiskManager:
 
     def pause_all(self, reason: str) -> None:
         log.error("%s; pausing all quoting for %.0fs", reason, self.cfg.cooldown_seconds)
+        self.global_pause_reason = reason
         self._pause_until = self._clock() + self.cfg.cooldown_seconds
 
     @property
@@ -131,9 +134,14 @@ class RiskManager:
                 "%s: %s; pausing market for %.0fs", ticker, reason, self.cfg.cooldown_seconds
             )
         self._market_pause_until[ticker] = self._clock() + self.cfg.cooldown_seconds
+        self.pause_reasons[ticker] = reason
 
     def market_paused(self, ticker: str) -> bool:
         return self._clock() < self._market_pause_until.get(ticker, 0.0)
+
+    def pause_left(self, ticker: str) -> float:
+        """Seconds until ``ticker`` resumes (0 if not paused)."""
+        return max(self._market_pause_until.get(ticker, 0.0) - self._clock(), 0.0)
 
     def near_close(self, market: Market) -> bool:
         to_close = market.seconds_to_close()
@@ -159,6 +167,9 @@ class RiskManager:
                 self.cfg.cooldown_seconds,
             )
             self._market_pause_until[ticker] = now + self.cfg.cooldown_seconds
+            self.pause_reasons[ticker] = (
+                f"{traded:f} contracts filled in {self.cfg.fill_burst_window_seconds:.0f}s"
+            )
             history.clear()
             history.append((now, position))
 

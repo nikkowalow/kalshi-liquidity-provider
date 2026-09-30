@@ -2,26 +2,39 @@
 
 In ``incentives`` mode we pull every active liquidity program, simulate the
 quotes we would post in each market, estimate our daily reward from the
-program's scoring rules, and keep the best ``max_markets``. ``volume`` mode
-(handy in demo, where programs may not exist) takes the most-traded markets,
-and ``tickers`` mode quotes exactly the configured list.
+program's scoring rules, and keep the best ``max_markets``. With
+``fill_risk`` on, the best candidates are then re-ranked by reward minus the
+expected cost of being filled, replayed from their recent public trades (see
+:mod:`strategy.fill_risk`). ``volume`` mode (handy in demo, where programs may
+not exist) takes the most-traded markets, and ``tickers`` mode quotes exactly
+the configured list.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+import time
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Protocol, TypeVar
+
+import httpx
 
 from kalshi_lp.config import QuotingConfig, SelectionConfig
 from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.types import ZERO, Leg
 from kalshi_lp.exchange.client import KalshiClient
-from kalshi_lp.exchange.models import IncentiveProgram, Market
+from kalshi_lp.exchange.errors import KalshiError
+from kalshi_lp.exchange.models import IncentiveProgram, Market, Trade
+from kalshi_lp.strategy.fill_risk import FillRisk, PlannedQuote, depth_ahead, estimate_fill_risk
 from kalshi_lp.strategy.quoting import MarketContext, QuoteEngine
-from kalshi_lp.strategy.rewards import RewardParams, expected_daily_reward
+from kalshi_lp.strategy.rewards import (
+    Competition,
+    RewardParams,
+    competition,
+    expected_daily_reward,
+)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +55,36 @@ class Candidate:
     reward: RewardParams
     est_daily_reward: Decimal  # 0 when the market has no program
     rank_score: Decimal
+    earned: Decimal = ZERO  # already earned here (incumbents), counts toward the payout
+    competition: Competition | None = None
+    quotes: Mapping[Leg, PlannedQuote] = field(default_factory=dict)  # what we'd post
+    fill_risk: FillRisk | None = None  # set for the candidates whose trades were checked
+    rank_multiplier: Decimal = Decimal(1)  # competition and incumbency factors
+    unpaid_bonus: Decimal = ZERO  # $/day: what leaving would forfeit (see protect_unpaid)
+
+    @property
+    def pair_cost(self) -> Decimal:
+        """Cash one contract on each leg locks (YES bid price + NO bid price)."""
+        return sum((q.price for q in self.quotes.values()), ZERO) or Decimal(1)
+
+    @property
+    def size(self) -> Decimal:
+        """Contracts per side the estimate assumes."""
+        return max((q.size for q in self.quotes.values()), default=ZERO)
+
+    @property
+    def fill_cost_per_day(self) -> Decimal:
+        return self.fill_risk.cost_per_day if self.fill_risk else ZERO
+
+    @property
+    def net_daily_reward(self) -> Decimal:
+        """Estimated reward minus the expected cost of getting filled."""
+        return self.est_daily_reward - self.fill_cost_per_day
+
+    @property
+    def value(self) -> Decimal:
+        """What the ranking compares, $/day: net reward plus what leaving would forfeit."""
+        return self.net_daily_reward + self.unpaid_bonus
 
     @property
     def earning_days_left(self) -> Decimal:
@@ -54,12 +97,29 @@ class Candidate:
 
     @property
     def est_period_payout(self) -> Decimal:
-        """Projected payout for the rest of the program period, at the estimated daily rate."""
-        return self.est_daily_reward * self.earning_days_left
+        """Projected payout for the program period: earned so far plus the rest at the estimate."""
+        return self.earned + self.est_daily_reward * self.earning_days_left
 
     @property
     def ticker(self) -> str:
         return self.market.ticker
+
+
+@dataclass(frozen=True, slots=True)
+class _Catalog:
+    """Programs and their markets: slow-changing, so reused between scans."""
+
+    rewards: dict[str, RewardParams]
+    markets: list[Market]
+    programs: int
+    fetched_at: float
+
+
+@dataclass(slots=True)
+class _TradeHistory:
+    trades: dict[str, Trade]  # by trade id
+    covered_from: float  # unix seconds: complete from here on
+    fetched_at: float
 
 
 class MarketSelector:
@@ -69,11 +129,18 @@ class MarketSelector:
         selection: SelectionConfig,
         quoting: QuotingConfig,
         engine: QuoteEngine,
+        *,
+        max_capital: Decimal | None = None,
     ):
         self.client = client
         self.cfg = selection
         self.quoting = quoting
         self.engine = engine
+        self.max_capital = max_capital  # risk.max_capital: with auto_size, sets how many markets
+        self._catalog: _Catalog | None = None
+        self._incumbents: dict[str, Decimal] = {}
+        self._exclude: set[str] = set()
+        self._trades: dict[str, _TradeHistory] = {}
 
     # ------------------------------------------------------------- rewards
 
@@ -107,7 +174,7 @@ class MarketSelector:
     def is_eligible(self, market: Market) -> bool:
         if not market.is_tradable or market.market_type != "binary":
             return False
-        if market.ticker in self.cfg.exclude_tickers:
+        if market.ticker in self.cfg.exclude_tickers or market.ticker in self._exclude:
             return False
         to_close = market.seconds_to_close()
         return to_close is None or to_close >= self.cfg.min_seconds_to_close
@@ -122,15 +189,40 @@ class MarketSelector:
             and self.cfg.min_mid_price <= mid <= self.cfg.max_mid_price
         )
 
+    @property
+    def auto_sizing(self) -> bool:
+        return self.quoting.auto_size and self.max_capital is not None
+
+    @property
+    def planned_size(self) -> Decimal:
+        """Contracts per side the bot will quote in a selected market. With auto_size the
+        capital goes to the best markets at full size, so that's the size to estimate at."""
+        if self.auto_sizing:
+            return min(self.quoting.max_size or self.engine.max_position, self.engine.max_position)
+        return self.quoting.size
+
     def estimate(self, market: Market, book: Orderbook, reward: RewardParams) -> Decimal:
         """Estimated daily reward if we posted our standard quotes into ``book`` now."""
+        return self.plan(market, book, reward)[0]
+
+    def plan(
+        self, market: Market, book: Orderbook, reward: RewardParams
+    ) -> tuple[Decimal, dict[Leg, PlannedQuote]]:
+        """The quotes we'd post into ``book`` now, and their estimated daily reward."""
         if reward.reward_per_day <= 0:
-            return ZERO
-        decisions = self.engine.quote(MarketContext(market, book, ZERO, reward))
+            return ZERO, {}
+        decisions = self.engine.quote(
+            MarketContext(market, book, ZERO, reward, size=self.planned_size)
+        )
+        quotes = {
+            leg: PlannedQuote(d.leg_price, d.quote.size, depth_ahead(book.bids(leg), d.leg_price))
+            for leg, d in decisions.items()
+            if d.quote is not None and d.leg_price is not None
+        }
         yes, no = decisions[Leg.YES].score, decisions[Leg.NO].score
         if yes is None or no is None:
-            return ZERO
-        return expected_daily_reward(yes, no, reward)
+            return ZERO, quotes
+        return expected_daily_reward(yes, no, reward), quotes
 
     # ------------------------------------------------------------ selection
 
@@ -141,10 +233,18 @@ class MarketSelector:
             markets += await self.client.get_markets(tickers=chunk, exclude_multivariate=False)
         return markets
 
-    async def select(self) -> list[Candidate]:
-        programs = await self.client.get_incentive_programs()
-        rewards = self.reward_params(programs)
-        log.info("active liquidity programs: %d across %d markets", len(programs), len(rewards))
+    async def select(
+        self,
+        incumbents: Mapping[str, Decimal] | None = None,
+        exclude: Iterable[str] = (),
+    ) -> list[Candidate]:
+        """Pick markets. ``incumbents`` maps markets we already hold a stake in (quoting now,
+        or rewards earned) to the rewards earned there; they get ``incumbent_bonus``.
+        ``exclude`` sits markets out of this round (e.g. paused ones)."""
+        self._incumbents = dict(incumbents or {})
+        self._exclude = set(exclude)
+        catalog = await self._current_catalog()
+        rewards = catalog.rewards
 
         if self.cfg.mode == "tickers":
             return await self._rank(
@@ -152,12 +252,12 @@ class MarketSelector:
             )
 
         if self.cfg.mode == "incentives" and rewards:
-            ranked = await self._rank(
-                await self.fetch_markets(list(rewards)), rewards, by_reward=True, limit=None
-            )
+            ranked = await self._rank(catalog.markets, rewards, by_reward=True, limit=None)
             worth_it = self._explain_and_filter(ranked)
+            if self.cfg.fill_risk and worth_it:
+                worth_it = await self._apply_fill_risk(worth_it)
             if worth_it or not self.cfg.fallback_to_volume:
-                return self._diversify(worth_it, self.cfg.max_markets)
+                return self._fit_capital(self._diversify(worth_it, self.cfg.max_markets))
             log.warning("no incentive market passed filters; falling back to volume ranking")
         elif self.cfg.mode == "incentives":
             if not self.cfg.fallback_to_volume:
@@ -194,11 +294,190 @@ class MarketSelector:
             if book is None or not self.book_is_quotable(book):
                 continue
             reward = rewards.get(market.ticker, self.default_reward())
-            est = self.estimate(market, book, reward)
-            rank = est if by_reward else market.volume_24h
-            candidates.append(Candidate(market, reward, est, rank))
+            est, quotes = self.plan(market, book, reward)
+            earned = self._incumbents.get(market.ticker)
+            comp = competition(book, reward)
+            multiplier = Decimal(1)
+            if by_reward:
+                multiplier *= self.competition_factor(comp)
+                if earned is not None:
+                    multiplier *= 1 + self.cfg.incumbent_bonus
+            c = Candidate(market, reward, est, ZERO, earned or ZERO, comp, quotes, None, multiplier)
+            c = replace(c, unpaid_bonus=self._unpaid_bonus(c) if earned is not None else ZERO)
+            candidates.append(
+                replace(c, rank_score=c.value * multiplier if by_reward else market.volume_24h)
+            )
         candidates.sort(key=lambda c: c.rank_score, reverse=True)
-        return self._diversify(candidates, len(candidates) if limit is None else limit)
+        if limit is None:
+            # Unlimited: the caller filters and re-ranks, then diversifies at the end, so a
+            # second market in a series still gets its chance (e.g. a safer one).
+            return candidates
+        return self._diversify(candidates, limit)
+
+    def competition_factor(self, comp: Competition) -> Decimal:
+        w = self.cfg.competition_weight
+        return {"low": 1 + w, "high": 1 - w}.get(comp.level, Decimal(1))
+
+    async def _apply_fill_risk(self, ranked: list[Candidate]) -> list[Candidate]:
+        """Re-rank the best candidates by reward minus expected fill cost; drop the losers.
+
+        Checks the top ``fill_risk_pool`` (more if too few survive to fill
+        ``max_markets``, up to twice that). Only checked markets are returned.
+        """
+        cfg = self.cfg
+        now = time.time()
+        stale = now - cfg.trade_lookback_hours * 3600
+        self._trades = {t: h for t, h in self._trades.items() if h.fetched_at >= stale}
+        kept: list[Candidate] = []
+        dropped: list[Candidate] = []
+        checked = 0
+        for c in ranked:
+            enough = len(self._diversify(kept, cfg.max_markets)) >= cfg.max_markets
+            if checked >= 2 * cfg.fill_risk_pool or (checked >= cfg.fill_risk_pool and enough):
+                break
+            checked += 1
+            try:
+                trades, hours = await self._recent_trades(c.ticker, now)
+            except (KalshiError, httpx.HTTPError) as exc:
+                log.warning(
+                    "no trade history for %s (%s); ranking it without fill risk", c.ticker, exc
+                )
+                kept.append(c)
+                continue
+            risk = estimate_fill_risk(
+                trades,
+                c.quotes,
+                window_hours=hours,
+                sweep_window_seconds=cfg.sweep_window_seconds,
+                fee_rate=cfg.taker_fee_rate,
+                adverse_move=cfg.adverse_move,
+            )
+            c = replace(c, fill_risk=risk)
+            c = replace(c, rank_score=c.value * c.rank_multiplier)
+            (dropped if c.net_daily_reward <= cfg.min_net_daily_reward else kept).append(c)
+        kept.sort(key=lambda c: c.rank_score, reverse=True)
+        log.info(
+            "%d of %d checked markets still pay after expected fill costs "
+            "(replaying up to %gh of trades)",
+            len(kept),
+            checked,
+            cfg.trade_lookback_hours,
+        )
+        if dropped:
+            log.info("  skipped %4d: fills would cost more than the rewards", len(dropped))
+        risky = sorted(
+            (c for c in (*kept, *dropped) if c.fill_risk and c.fill_risk.fills_per_day > 0),
+            key=lambda c: c.fill_cost_per_day,
+            reverse=True,
+        )
+        for c in risky[:5]:
+            assert c.fill_risk is not None
+            log.info(
+                "  fill risk: %-44s est $%.2f/day, ~%.0f fills/day costing $%.2f/day "
+                "-> net $%.2f/day",
+                c.ticker,
+                c.est_daily_reward,
+                c.fill_risk.fills_per_day,
+                c.fill_cost_per_day,
+                c.net_daily_reward,
+            )
+        return kept
+
+    def _unpaid_bonus(self, c: Candidate) -> Decimal:
+        """$/day of earnings leaving ``c`` would forfeit (protect_unpaid), else 0.
+
+        Kalshi pays nothing below payout_minimum, so an incumbent that has earned
+        some but not enough loses it all if we leave. That's worth protecting only
+        if staying would reach the minimum; it is spread over the remaining time so
+        it compares with $/day rates.
+        """
+        minimum = self.cfg.payout_minimum
+        if not self.cfg.protect_unpaid or not (ZERO < c.earned < minimum):
+            return ZERO
+        if c.est_period_payout < minimum:
+            return ZERO  # lost either way
+        return c.earned / max(c.earning_days_left, Decimal(1) / 24)
+
+    def _fit_capital(self, ranked: list[Candidate]) -> list[Candidate]:
+        """With auto_size: the best markets at full size until the capital runs out.
+
+        Rewards scale with order size, so spreading the budget thin over more
+        markets only averages in worse ones. A last market that gets a partial
+        size is kept only if its (proportionally smaller) payout still passes
+        min_period_payout.
+        """
+        if not self.auto_sizing or self.max_capital is None:
+            return ranked
+        budget = self.max_capital * self.quoting.capital_utilization
+        chosen: list[Candidate] = []
+        for c in ranked:
+            need = c.size * c.pair_cost
+            if need <= 0:
+                continue
+            if need <= budget:
+                chosen.append(c)
+                budget -= need
+                continue
+            fraction = budget / need
+            partial = c.earned + c.est_daily_reward * fraction * c.earning_days_left
+            if budget > 0 and partial >= self.cfg.min_period_payout:
+                chosen.append(c)
+            break
+        if len(chosen) < len(ranked):
+            log.info(
+                "capital: $%s funds %d market(s) at up to %s contracts per side; "
+                "%d lower-ranked left out",
+                self.max_capital,
+                len(chosen),
+                self.planned_size,
+                len(ranked) - len(chosen),
+            )
+        return chosen
+
+    async def _current_catalog(self) -> _Catalog:
+        """Programs and (in incentives mode) their markets, refreshed every
+        catalog_refresh_seconds; order books are fetched fresh by every scan."""
+        now = time.time()
+        cached = self._catalog
+        if cached is not None and now - cached.fetched_at < self.cfg.catalog_refresh_seconds:
+            return cached
+        programs = await self.client.get_incentive_programs()
+        rewards = self.reward_params(programs)
+        markets = (
+            await self.fetch_markets(list(rewards))
+            if self.cfg.mode == "incentives" and rewards
+            else []
+        )
+        log.info("active liquidity programs: %d across %d markets", len(programs), len(rewards))
+        self._catalog = _Catalog(rewards, markets, len(programs), now)
+        return self._catalog
+
+    async def _recent_trades(self, ticker: str, now: float) -> tuple[list[Trade], float]:
+        """The last ``trade_lookback_hours`` of trades (cached, fetched incrementally),
+        and how many hours of history they actually cover."""
+        cfg = self.cfg
+        since = now - cfg.trade_lookback_hours * 3600
+        history = self._trades.get(ticker)
+        if history is None or history.fetched_at < since:
+            history = _TradeHistory({}, since, now)
+            fetch_from = since
+        else:
+            fetch_from = history.fetched_at - 5  # small overlap; duplicates merge by id
+        new = await self.client.get_trades(
+            ticker, min_ts=fetch_from, max_items=cfg.max_trades_per_market
+        )
+        if len(new) >= cfg.max_trades_per_market:
+            # Truncated: complete only back to the oldest trade returned, and there may be
+            # a gap before it, so start over from this batch.
+            history = _TradeHistory({}, min(t.ts.timestamp() for t in new), now)
+        history.trades.update({t.trade_id or f"{t.ts.isoformat()}|{t.count}": t for t in new})
+        history.fetched_at = now
+        history.covered_from = max(history.covered_from, since)
+        history.trades = {
+            k: t for k, t in history.trades.items() if t.ts.timestamp() >= history.covered_from
+        }
+        self._trades[ticker] = history
+        return list(history.trades.values()), (now - history.covered_from) / 3600
 
     def _explain_and_filter(self, ranked: list[Candidate]) -> list[Candidate]:
         """Apply the payout filters, logging why markets were skipped and the near misses."""

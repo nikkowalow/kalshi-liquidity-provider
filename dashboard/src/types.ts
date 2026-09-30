@@ -35,6 +35,11 @@ export interface LegQuote {
   share: Num
 }
 
+export interface CompetitionInfo {
+  level: 'low' | 'medium' | 'high'
+  room: Num // dollars below the best bid where others fill Target Size; null = they don't
+}
+
 export interface MarketRow {
   ticker: string
   title: string
@@ -43,6 +48,10 @@ export interface MarketRow {
   close_time: string | null
   reduce_only: boolean
   paused: boolean
+  pause_reason?: string | null // why it's paused, e.g. "18 contracts filled in 300s"
+  pause_left?: number // seconds until it resumes
+  flattening?: boolean // holding a position the bot is closing out
+  size?: Num // auto-sized contracts per side, when quoting.auto_size is on
   near_close: boolean
   healthy: boolean
   book: Book | null
@@ -52,6 +61,12 @@ export interface MarketRow {
   fees: number
   quotes: { yes?: LegQuote; no?: LegQuote }
   reward: { per_day: number; target_size: Num; discount_factor: Num }
+  competition?: CompetitionInfo | null
+  // From the latest selection (see src/kalshi_lp/strategy/fill_risk.py); null if not checked.
+  est_daily_reward?: Num // estimated reward $/day at selection
+  est_fills_per_day?: Num // our contracts recent sweeps would have filled, per day
+  fill_cost_per_day?: Num // what those fills cost (taker fee to exit + adverse move)
+  net_daily_reward?: Num // est_daily_reward - fill_cost_per_day
   earned: number
   rate_per_hour: number
   avg_score: number
@@ -109,13 +124,15 @@ interface Base {
 
 export interface OrderEvent extends Base {
   type: 'order'
-  action: 'place' | 'cancel' | 'decrease' | 'reject'
+  action: 'place' | 'cancel' | 'decrease' | 'reject' | 'exit'
+  filled?: Num // exits: contracts actually traded
   ticker: string
   side: string
   price: Num
   size: Num
   order_id?: string
   error?: string
+  reason?: string // why the bot did it (older journals lack it)
 }
 
 export interface FillEvent extends Base {
@@ -157,6 +174,10 @@ export interface MarketsEvent extends Base {
     discount_factor: Num
     est_daily_reward: number
     close_time: string | null
+    competition?: CompetitionInfo | null
+    est_fills_per_day?: Num
+    fill_cost_per_day?: Num
+    net_daily_reward?: Num
   }[]
   reduce_only: string[]
 }

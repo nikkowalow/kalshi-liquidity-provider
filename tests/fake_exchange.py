@@ -16,6 +16,7 @@ from kalshi_lp.exchange.models import (
     Market,
     Order,
     Position,
+    Trade,
 )
 from kalshi_lp.feed.state import MarketState
 
@@ -30,6 +31,10 @@ class FakeExchange:
         self.balance = Decimal(1000)
         self.trading_active = True
         self.cancel_all_calls = 0
+        self.exits: list[Quote] = []
+        self.program_calls = 0
+        self.trades: dict[str, list[Trade]] = {}  # public trades per market
+        self.trade_calls: list[tuple[str, float | None]] = []  # (ticker, min_ts) per get_trades
         self._ids = itertools.count(1)
 
     # reads
@@ -49,6 +54,7 @@ class FakeExchange:
         return {t: self._book_with_orders(t) for t in tickers if t in self.books}
 
     async def get_incentive_programs(self, **_: object) -> list[IncentiveProgram]:
+        self.program_calls += 1
         return list(self.programs)
 
     async def get_markets(self, *, tickers=None, **_: object) -> list[Market]:
@@ -87,6 +93,30 @@ class FakeExchange:
             )
             results.append(OrderResult(oid, coid))
         return results
+
+    async def create_order(
+        self, quote: Quote, client_order_id: str, *, time_in_force: str = "", **_: object
+    ) -> OrderResult:
+        """Immediate-or-cancel exits fill in full at their limit (enough liquidity assumed)."""
+        assert time_in_force == "immediate_or_cancel", "the bot only sends exits one at a time"
+        self.exits.append(quote)
+        signed = quote.size if quote.side.value == "bid" else -quote.size
+        prev = self.positions.get(quote.ticker, Position.flat(quote.ticker))
+        position = prev.position + signed
+        exposure = Decimal(0) if position == 0 else prev.market_exposure
+        self.positions[quote.ticker] = Position(
+            quote.ticker, position, exposure, Decimal(0), Decimal(0)
+        )
+        return OrderResult(f"x{next(self._ids)}", client_order_id, filled=quote.size)
+
+    async def get_trades(
+        self, ticker: str, *, min_ts: float | None = None, max_items: int = 5000
+    ) -> list[Trade]:
+        self.trade_calls.append((ticker, min_ts))
+        trades = [
+            t for t in self.trades.get(ticker, []) if min_ts is None or t.ts.timestamp() >= min_ts
+        ]
+        return sorted(trades, key=lambda t: t.ts, reverse=True)[:max_items]
 
     async def batch_cancel_orders(self, orders: Sequence[Order]) -> list[OrderResult]:
         return [

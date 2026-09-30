@@ -35,6 +35,9 @@ class ExecutionReport:
     gone: list[Order] = field(default_factory=list)  # cancelled
     resized: list[Order] = field(default_factory=list)
     rejections: list[tuple[Quote, str]] = field(default_factory=list)
+    exited: list[tuple[Quote, Decimal]] = field(
+        default_factory=list
+    )  # exit order, contracts filled
 
 
 class OrderExecutor:
@@ -73,6 +76,8 @@ class OrderExecutor:
                 log.info("[dry-run] decrease %s %s -> %s", o.ticker, o.order_id, size)
             for q in plan.creates:
                 log.info("[dry-run] place %s %s", q.ticker, q)
+            for q in plan.exits:
+                log.info("[dry-run] exit %s %s", q.ticker, q)
             return report
 
         await self._cancel(plan.cancels, report)
@@ -94,8 +99,31 @@ class OrderExecutor:
             except KalshiAPIError as exc:
                 report.errors += 1
                 log.warning("decrease %s failed: %s", order.order_id, exc)
+        await self._exit(plan.exits, report)
         await self._create(plan, report)
         return report
+
+    async def _exit(self, quotes: list[Quote], report: ExecutionReport) -> None:
+        """Close positions now: crossing, immediate-or-cancel, outside the order group.
+
+        Taker orders on purpose (the point is to trade), and outside the order
+        group so an exit can never trip the fill kill-switch meant for quotes.
+        """
+        for quote in quotes:
+            try:
+                r = await self.client.create_order(
+                    quote,
+                    self.new_client_order_id(),
+                    post_only=False,
+                    time_in_force="immediate_or_cancel",
+                )
+            except KalshiAPIError as exc:
+                report.errors += 1
+                report.rejections.append((quote, str(exc)))
+                log.warning("exit %s %s failed: %s", quote.ticker, quote, exc)
+                continue
+            report.exited.append((quote, r.filled))
+            log.info("exit %s %s: filled %s", quote.ticker, quote, r.filled)
 
     async def _cancel(self, orders: list[Order], report: ExecutionReport) -> None:
         for i in range(0, len(orders), self.max_batch * 5):  # cancels are 5x cheaper

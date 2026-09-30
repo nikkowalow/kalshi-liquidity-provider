@@ -201,3 +201,52 @@ class IncentiveProgram:
     def is_active(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(UTC)
         return self.start <= now < self.end
+
+
+@dataclass(frozen=True, slots=True)
+class Trade:
+    """One public trade print (``GET /markets/trades``)."""
+
+    trade_id: str
+    ticker: str
+    yes_price: Decimal
+    count: Decimal
+    # Which bid book the taker traded against. A taker selling YES (buying NO) hits
+    # the YES bids; a taker buying YES hits the NO bids. None if the API didn't say.
+    hit_leg: Leg | None
+    ts: datetime
+    block: bool = False  # negotiated block trade: never touched the order book
+
+    @classmethod
+    def from_api(cls, d: Mapping[str, Any]) -> Trade:
+        yes_price = _opt_decimal(d.get("yes_price_dollars"))
+        if yes_price is None and d.get("yes_price") is not None:
+            yes_price = to_decimal(d["yes_price"]) / 100  # legacy cents
+        ts = parse_ts(d.get("created_time"))
+        if yes_price is None or ts is None:
+            raise ValueError(f"trade {d.get('trade_id')} missing price or time")
+        count = _opt_decimal(d.get("count_fp"))
+        if count is None:
+            count = to_decimal(d.get("count"))
+        book_side, taker_side = d.get("taker_book_side"), d.get("taker_side")
+        hit_leg: Leg | None = None
+        if book_side == "ask" or (book_side is None and taker_side == "no"):
+            hit_leg = Leg.YES
+        elif book_side == "bid" or (book_side is None and taker_side == "yes"):
+            hit_leg = Leg.NO
+        return cls(
+            trade_id=str(d.get("trade_id", "")),
+            ticker=str(d.get("ticker", "")),
+            yes_price=yes_price,
+            count=count,
+            hit_leg=hit_leg,
+            ts=ts,
+            block=bool(d.get("is_block_trade")),
+        )
+
+    @property
+    def leg_price(self) -> Decimal | None:
+        """Price in the terms of the book that was hit (NO price for the NO bids)."""
+        if self.hit_leg is None:
+            return None
+        return self.yes_price if self.hit_leg is Leg.YES else ONE - self.yes_price

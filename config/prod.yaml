@@ -19,7 +19,9 @@ loop: # quoting is event-driven off the WebSocket feed
   reconcile_interval_seconds: 15 # REST cross-check of orders/positions/balance
   queue_refresh_seconds: 3 # our queue positions (rank in book, reward tracking)
   reward_report_seconds: 60 # log estimated rewards earned
-  reselect_interval_seconds: 900
+  reselect_interval_seconds: 60 # scan for better-paying markets every minute (quoting continues)
+  reselect_on_pause: true # a paused market's slot goes to the best other market, if one qualifies
+  min_reselect_gap_seconds: 60
   status_check_interval_seconds: 30
 
 rate_limits:
@@ -29,7 +31,8 @@ rate_limits:
 selection:
   mode: incentives
   fallback_to_volume: false # in prod, only quote markets that pay rewards
-  max_markets: 8 # a bid at p plus an ask at q locks ~(p + 1 - q) = ~$1 per contract: 4 x 4 = ~$16
+  max_markets: 16 # upper bound. With auto_size, capital decides: the best markets get full size
+  # (quoting.max_size) until max_capital is used, e.g. $80 / (30 x ~$0.95) = ~3 markets.
   max_per_series: 1 # with only 4 markets, spread across unrelated events
   min_seconds_to_close: 21600 # 6h; close_buffer_seconds pulls quotes 2h before close anyway
   min_mid_price: 0.10 # below this a 5c move is a 50%+ loss
@@ -38,12 +41,33 @@ selection:
   min_daily_reward: 0 # off: $0.40/day for 5 days still pays $2. The payout filter decides
   min_period_payout: 1.25 # projected payout until period end/market close; Kalshi pays nothing under $1.
   # Keep size and this in balance: halving size roughly halves every market's payout.
+  # Earnings already made in a market count toward this, so a market close to $1 stays.
+  competition_weight: 0 # off: rank purely by estimated $/day (fastest to the payout). 0.25 would rank
+  # uncrowded markets x1.25 and crowded ones x0.75. Competition still shows on the dashboard.
+  # Fill risk: replay each top candidate's last 24h of public trades against the quotes we'd post.
+  # Sweeps that would have eaten the queue in front of us = fills; each costs the taker fee to
+  # exit plus the move that caused it. Rank by net $/day = reward - fill cost; drop net <= 0.
+  fill_risk: true
+  fill_risk_pool: 25 # top candidates checked per re-rank (one trades query each)
+  trade_lookback_hours: 24
+  sweep_window_seconds: 2 # prints this close together are one sweep: faster than we can react
+  taker_fee_rate: 0.07 # Kalshi taker fee: 0.07 x P x (1 - P) per contract
+  adverse_move: 0.02 # assumed loss per filled contract from the move that swept us
+  min_net_daily_reward: 0
+  catalog_refresh_seconds: 600 # reuse the program/market list for 10 min; books are always fresh
+  incumbent_bonus: 0.10 # switching margin: a better market must pay 10%+ more $/h to take a slot
+  # (smaller gaps are estimate noise, and each switch loses the queue spot)
+  protect_unpaid: true # leaving a market with unpaid earnings under $1 forfeits them: count that
+  payout_minimum: 1 # Kalshi pays nothing below $1
   exclude_tickers: []
 
 quoting:
   placement: reward
   share_tolerance: 0.25 # accept 25% less reward share for a deeper, safer price
-  size: 8 # contracts per side; your reward share scales with it
+  size: 4 # contracts per side when auto_size is off
+  auto_size: true # capital to the best markets first, each at max_size (selection estimates at it)
+  max_size: 30 # contracts per side per market with auto_size
+  capital_utilization: 0.95 # put 95% of the budget to work
   offset_ticks: 0
   min_edge: 0.01
   skew_per_contract: 0.005 # 4 contracts held -> quotes shift 2c away
@@ -59,18 +83,22 @@ quoting:
 
 risk:
   max_capital: 80 # $ cap: position cost + cash locked in resting orders (actual $, per price)
-  max_position_per_market: 8 # one full fill; then only the reducing side quotes
-  max_total_exposure: 20
+  max_position_per_market: 40 # also caps order size; keep >= quoting.max_size
+  max_total_exposure: 40 # with flatten_on_fill, positions only exist for the seconds it takes to exit
+  flatten_on_fill: true # never hold shares: on a fill, pull that market's quotes and exit at once
+  flatten_slippage: 0.02 # an exit may trade up to 2c through the best price to get out fully
+  flatten_retry_seconds: 2
   max_session_loss: 8 # halt and cancel everything while validating
   min_balance: 0 # cash floor; max_capital already bounds what the bot uses
   fill_burst_contracts: 2 # any fill of 2+ contracts pauses that market...
   fill_burst_window_seconds: 300
-  cooldown_seconds: 600 # ...for 10 minutes
+  cooldown_seconds: 300 # ...for 5 minutes (its slot can go to another market meanwhile)
   close_buffer_seconds: 7200
   max_consecutive_errors: 5
   max_mid_move: 0.04 # mid moves 4c within 60s -> news; pause the market
   mid_move_window_seconds: 60
-  order_group_contracts_limit: 8 # exchange-side: >2 full fills in 15s cancels everything
+  order_group_contracts_limit: 80 # exchange-side: >2 full fills (2 x max_size) in 15s cancels
+  # everything. Exits are sent outside the group, so flattening never trips it.
 
 logging:
   level: INFO

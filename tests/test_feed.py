@@ -111,6 +111,20 @@ def test_tombstones_block_stale_resurrection() -> None:
     assert not state.orders
 
 
+def test_lagging_snapshot_does_not_drop_a_just_placed_order() -> None:
+    clock = Clock()
+    state = MarketState("klp", clock=clock)
+    order = make_order(Side.BID, "0.4000", 10, order_id="o1", client_order_id="klp-1")
+    as_of = state.now()  # the reconcile starts its REST request...
+    clock.now = 1.0
+    state.upsert_order(order)  # ...we place an order while it is in flight...
+    state.replace_orders([], as_of)  # ...and the snapshot comes back without it
+    assert "o1" in state.orders  # otherwise the bot would place it a second time
+    clock.now = 2.0
+    state.replace_orders([], state.now())  # a snapshot taken after placement: really gone
+    assert not state.orders
+
+
 # --------------------------------------------------------------- positions
 
 

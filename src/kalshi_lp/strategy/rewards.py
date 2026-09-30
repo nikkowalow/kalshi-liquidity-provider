@@ -26,9 +26,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from kalshi_lp.core.orderbook import Level
+from kalshi_lp.core.orderbook import Level, Orderbook
 from kalshi_lp.core.pricing import PriceGrid
-from kalshi_lp.core.types import ZERO
+from kalshi_lp.core.types import ZERO, Leg
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +170,49 @@ def expected_daily_reward(yes: SideScore, no: SideScore, params: RewardParams) -
     pays us ``score / 2`` of that second's slice of the reward.
     """
     return params.reward_per_day * snapshot_score(yes, no) / 2
+
+
+# Competition levels by "room" (see competition()). Kalshi's site shows High/Medium/Low
+# but the API doesn't expose it, so this is our own measure.
+HIGH_COMPETITION_ROOM = Decimal("0.01")  # Target Size fills within 1c of the best bid
+MEDIUM_COMPETITION_ROOM = Decimal("0.03")
+
+
+@dataclass(frozen=True, slots=True)
+class Competition:
+    """How crowded a market's qualifying depth is.
+
+    Only the first Target Size contracts on a side are scored, so more
+    competitors don't shrink the reward pool; they compress it toward the top
+    of the book. ``room`` is how far below the best bid others' orders reach
+    Target Size, on the tighter side. Little room means you must quote at the
+    top to earn at all (fill risk), and any better-priced order pushes you out
+    of the counted depth. Plenty of room means you can rest deep and still
+    count. ``room`` is None when neither side's others reach Target Size.
+    """
+
+    level: str  # "low" | "medium" | "high"
+    room: Decimal | None
+
+
+def side_room(bids: Sequence[Level], target_size: Decimal) -> Decimal | None:
+    """Dollars from the best bid down to where ``bids`` reach ``target_size``, or None."""
+    boundary = reference_price(bids, target_size)
+    return None if boundary is None or not bids else bids[0].price - boundary
+
+
+def competition(others: Orderbook, params: RewardParams) -> Competition:
+    """Competition from a book of *other* traders' orders (ours removed)."""
+    rooms = [side_room(others.bids(leg), params.target_size) for leg in Leg]
+    known = [r for r in rooms if r is not None]
+    if not known:
+        return Competition("low", None)
+    room = min(known)
+    if room <= HIGH_COMPETITION_ROOM:
+        return Competition("high", room)
+    if room <= MEDIUM_COMPETITION_ROOM:
+        return Competition("medium", room)
+    return Competition("low", room)
 
 
 def earned_per_snapshot(score: Decimal, params: RewardParams) -> Decimal:

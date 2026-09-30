@@ -6,10 +6,23 @@ import { MarketsTable } from './components/MarketsTable'
 import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/SidePanels'
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
+import { useEffect, useMemo } from 'react'
+import { scaleView } from './lib/scale'
 import { useJournal } from './lib/useJournal'
+import { useMultiplier } from './lib/useMultiplier'
 
 export default function App() {
-  const { runs, runId, chooseRun, follow, setFollow, state, journal, connected } = useJournal()
+  const raw = useJournal()
+  const { runs, runId, chooseRun, follow, setFollow, connected } = raw
+  const [multiplier, setMultiplier] = useMultiplier()
+  // Everything below sees the projected numbers; the multiplier is display-only.
+  const { state, journal, rewardFactor } = useMemo(
+    () => scaleView(raw.state, raw.journal, multiplier),
+    [raw.state, raw.journal, multiplier],
+  )
+  useEffect(() => {
+    document.body.classList.toggle('simulated', multiplier !== 1) // projected numbers turn yellow
+  }, [multiplier])
   const rejects = journal.orders.filter((o) => o.action === 'reject').length
 
   return (
@@ -22,6 +35,9 @@ export default function App() {
         onFollow={setFollow}
         state={state}
         serverUp={connected}
+        multiplier={multiplier}
+        onMultiplier={setMultiplier}
+        rewardFactor={rewardFactor}
       />
       <Kpis state={state} fills={journal.fills.length} rejects={rejects} />
       <Tape journal={journal} />

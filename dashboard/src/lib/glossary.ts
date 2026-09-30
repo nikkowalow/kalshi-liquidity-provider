@@ -35,7 +35,7 @@ export const HELP: Record<string, HelpEntry> = {
   "panel:orders": ["Resting orders", "The bot's orders sitting on the order book right now."],
   "panel:fills": ["Fills", "Trades that happened against the bot's orders this run."],
   "panel:log": ["Log", "The bot's own log messages. Yellow is a warning and red is an error. The level buttons filter what's shown."],
-  "panel:selection": ["Market selection history", "Each time the bot re-ranked markets (every 10–15 minutes), which ones it chose and why."],
+  "panel:selection": ["Market selection history", "Each time the bot's market scan (every minute) changed which markets it quotes: the markets it chose, best $/h first."],
   "panel:config": ["Run config", "The full settings this run started with (from config/*.yaml plus command-line flags)."],
 
   // market columns
@@ -63,11 +63,21 @@ export const HELP: Record<string, HelpEntry> = {
   // flags
   "flag:PAST": ["PAST", "The bot isn't quoting this market now. It's here because the bot earned (or tried to earn) rewards in it earlier, in this session or a previous one. Earned and snapshot counts are totals across all sessions."],
   "chip:past": ["Past markets", "Show or hide markets the bot quoted earlier but isn't quoting now."],
+  "blot:Reason": ["Reason", "Why the bot did it. reprice a -> b: the target price moved (the part in brackets is the strategy's reason and your estimated reward share there). new quote: nothing was resting on that side. stop quoting bid/ask: that side is switched off (e.g. position limit, thin book). shrink: fewer contracts wanted. top up: refill after a partial fill. market paused / closes within / not selected / feed disconnected / shutting down: the whole market was pulled. shrunk ... to fit max_capital: the budget cut the order. Hover a cell for the full text."],
+  "col:Fills/d": ["Expected fills per day", "How many of our contracts would have been filled per day, replaying the market's recent public trades (selection.trade_lookback_hours) against the quotes the bot posts. A fill comes from a sweep: a burst of selling bigger than the queue in front of us, too fast to dodge. Green: no recent sweep would have reached us. Red: the fills would cost at least half the reward. Hover a number for the daily cost. Updated by the market scan every minute."],
+  "col:Net $/h": ["Net $/hour", "Estimated reward per hour, at the size the bot quotes, minus the expected cost of getting filled (each fill costs the taker fee to exit plus the price move that swept us). The bot scans every minute (loop.reselect_interval_seconds) and keeps its capital in the markets with the highest net $/h; a better market takes a slot once it pays selection.incumbent_bonus (10%) more. Hover for the daily figure. — means the market's trades weren't checked (e.g. it was only kept for a pause)."],
+  "col:Comp": ["Competition", "How crowded the rewarded depth is. Only the first Target Size contracts on each side earn, so competitors don't shrink the reward pool; they squeeze it toward the top of the book. The number is the room: how many cents below the best bid other traders' orders fill up Target Size (on the tighter side). Plenty of room lets the bot rest deep, where fills are rare, and still earn. Shown for information: selection ranks purely by estimated $/day unless selection.competition_weight is set above 0. Kalshi's site shows a similar High/Medium/Low label, but the API doesn't provide it, so this is the bot's own measure."],
+  "comp:low": ["Low competition", "Others' orders only reach Target Size more than 3¢ below the best bid (∞: they don't reach it at all). The bot can rest well below the top and still earn."],
+  "comp:medium": ["Medium competition", "Others' orders reach Target Size 2–3¢ below the best bid."],
+  "comp:high": ["High competition", "Others' orders fill Target Size within 1¢ of the best bid. To earn anything the bot must quote at the very top, where fills happen, and any better-priced order pushes it out of the counted depth."],
+  "bar:multiplier": ["Capital multiplier (display only)", "Shows what this run would look like with N times the capital: every order, position, balance, capital and P&L figure is multiplied by N. Nothing changes in the bot. Rewards are NOT simply multiplied: your share of each book is ours / (ours + others), so N times the size gives share N·s / (N·s + 1 − s), a gain that shrinks as your share grows. 'rewards ×' is the resulting overall reward multiplier. Expected fills and their cost (Fills/d, Net $/d) are scaled N times, since bigger orders catch more of each sweep. Not modelled: more capital would also let the bot quote more markets; bigger orders may reach past a program's Target Size; other traders react."],
   "bar:session": ["Session", "How many times the bot has been started into this journal. Stopping and restarting the bot continues the same history: rewards, fills and past markets carry over. SINCE is when the first session started."],
   "flag:ok": ["ok", "Nothing unusual: the bot is quoting normally."],
   "flag:BLIND": ["BLIND", "The bot lost its trusted view of this order book (disconnected, or a missed update). It has pulled its orders here until a fresh copy of the book arrives."],
   "flag:PAUSED": ["PAUSED", "Quoting is paused for risk.cooldown_seconds, for one of two reasons. Too many contracts filled here in a short time (risk.fill_burst_contracts), which often means someone better informed is trading against you. Or the price moved sharply (risk.max_mid_move within mid_move_window_seconds), which usually means news."],
   "flag:CLOSING": ["CLOSING", "The market closes soon (within risk.close_buffer_seconds). The bot stops quoting, because prices can jump on last-minute news."],
+  "type:exit": ["Exit", "An immediate-or-cancel order that crossed the book to close a filled position (risk.flatten_on_fill). It trades right away as a taker (paying the spread and taker fee) or cancels; it never rests."],
+  "flag:FLATTENING": ["Flattening", "An order here was filled and the bot is closing the position right away (risk.flatten_on_fill): its quotes are pulled and an immediate-or-cancel order crosses the book to sell (or buy back) the contracts. It retries every few seconds until the position is zero."],
   "flag:REDUCE-ONLY": ["REDUCE-ONLY", "The bot will only place orders that shrink your position here. Either the market dropped out of the selection while you still held a position, or a capital or exposure limit was reached."],
 
   // blotter
@@ -146,6 +156,16 @@ export function helpFor(key: string): HelpEntry | null {
   const [kind, ...rest] = key.split(':')
   const value = rest.join(':')
   if (kind === 'reason') return reasonHelp(value)
+  if (kind === 'paused') {
+    const [reason, left] = value.split('|')
+    const secs = Math.max(0, Math.round(Number(left) || 0))
+    const when = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`
+    return [
+      'Paused',
+      `Why: ${reason || 'a risk limit'}. Resumes in ${when}.`,
+      'Its orders are pulled meanwhile. With loop.reselect_on_pause the bot looks for a better market to take this slot; if none passes the filters, this market keeps the slot and resumes after the pause.',
+    ]
+  }
   if (kind === 'ticker') {
     const [ticker, title] = value.split('|')
     return [ticker, title || '(no description)', 'Prices in this row are for YES on this outcome.']

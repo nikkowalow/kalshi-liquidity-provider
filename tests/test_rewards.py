@@ -93,3 +93,20 @@ def test_earned_per_snapshot_matches_program_formula(reward: RewardParams) -> No
     # earns the full daily reward.
     full_day = earned_per_snapshot(D(2), reward) * 86_400
     assert full_day.quantize(D("0.01")) == reward.reward_per_day
+
+
+def test_competition_measures_room_below_the_best_bid() -> None:
+    from kalshi_lp.strategy.rewards import RewardParams, competition
+    from tests.factories import make_book
+
+    params = RewardParams(target_size=Decimal(100), discount_factor=Decimal("0.5"))
+    crowded = make_book(yes=[("0.45", 150)], no=[("0.50", 30), ("0.40", 200)])
+    spacious = make_book(yes=[("0.45", 30), ("0.40", 200)], no=[("0.50", 30), ("0.44", 200)])
+    middling = make_book(yes=[("0.45", 30), ("0.43", 200)], no=[("0.50", 30), ("0.44", 200)])
+    thin = make_book(yes=[("0.45", 30)], no=[("0.50", 30)])
+    assert competition(crowded, params).level == "high"  # YES: all 100 at the top price
+    assert competition(crowded, params).room == 0
+    assert competition(spacious, params).level == "low"
+    assert competition(spacious, params).room == Decimal("0.05")
+    assert competition(middling, params).level == "medium"
+    assert competition(thin, params).room is None

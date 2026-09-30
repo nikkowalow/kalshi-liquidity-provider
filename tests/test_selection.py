@@ -2,9 +2,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from kalshi_lp.config import QuotingConfig, SelectionConfig
-from kalshi_lp.exchange.models import IncentiveProgram
+from kalshi_lp.core.types import Leg
+from kalshi_lp.exchange.models import IncentiveProgram, Trade
 from kalshi_lp.strategy.quoting import QuoteEngine
-from kalshi_lp.strategy.selection import MarketSelector, series_of
+from kalshi_lp.strategy.rewards import RewardParams
+from kalshi_lp.strategy.selection import Candidate, MarketSelector, series_of
 from tests.factories import make_book, make_market
 from tests.fake_exchange import FakeExchange
 
@@ -128,3 +130,226 @@ async def test_payout_projection_stops_at_market_close() -> None:
     assert D("0.28") < c.earning_days_left < D("0.30")  # ~7h, not 3 days
     expected = c.est_daily_reward * D(7) / 24  # clock ticks between calls, so compare to the cent
     assert abs(c.est_period_payout - expected) < D("0.01")
+
+
+async def test_incumbent_keeps_its_slot_against_a_slightly_better_newcomer() -> None:
+    # Same series, so only one can be picked. NEW pays 20% more, less than a 50% bonus.
+    tickers = ["APPROVE-OLD", "APPROVE-NEW"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("APPROVE-OLD", 100), program("APPROVE-NEW", 120)]
+    sel = selector(ex, mode="incentives", max_per_series=1, incumbent_bonus=D("0.5"))
+    [fresh] = await sel.select()
+    assert fresh.ticker == "APPROVE-NEW"
+    [kept] = await sel.select({"APPROVE-OLD": D("0.29")})
+    assert kept.ticker == "APPROVE-OLD" and kept.earned == D("0.29")
+    [switched] = await selector(ex, mode="incentives", max_per_series=1, incumbent_bonus=0).select(
+        {"APPROVE-OLD": D("0.29")}
+    )
+    assert switched.ticker == "APPROVE-NEW"
+
+
+async def test_earnings_so_far_count_toward_the_payout_minimum() -> None:
+    now = datetime.now(UTC)
+    ex = FakeExchange([make_market("ENDING-1")], {"ENDING-1": BOOK})
+    ex.programs = [  # a tiny program ending in 10 minutes: can't reach $1 from scratch
+        IncentiveProgram(
+            "e",
+            "ENDING-1",
+            "liquidity",
+            now - timedelta(days=1),
+            now + timedelta(minutes=10),
+            D(20),
+            False,
+            D("0.5"),
+            D(100),
+        )
+    ]
+    sel = selector(ex, mode="incentives", min_period_payout=D("1.0"), fallback_to_volume=False)
+    assert await sel.select() == []
+    [c] = await sel.select({"ENDING-1": D("0.99")})  # but we are nearly there
+    assert c.est_period_payout >= 1
+
+
+async def test_competition_is_neutral_by_default() -> None:
+    ex = FakeExchange([make_market("PACKED-1")], {"PACKED-1": BOOK})
+    ex.programs = [program("PACKED-1", 100)]
+    [c] = await selector(ex, mode="incentives").select()
+    assert c.competition and c.competition.level == "high"
+    assert c.rank_score == c.est_daily_reward  # ranked purely by estimated $/day
+
+
+async def test_uncrowded_markets_rank_higher_when_weighted() -> None:
+    spacious = make_book(yes=[("0.45", 30), ("0.40", 200)], no=[("0.45", 30), ("0.40", 200)])
+    ex = FakeExchange(
+        [make_market("ROOMY-1"), make_market("PACKED-1")], {"ROOMY-1": spacious, "PACKED-1": BOOK}
+    )  # BOOK: Target Size within 1c
+    ex.programs = [program("ROOMY-1", 100), program("PACKED-1", 100)]
+    picked = {
+        c.ticker: c
+        for c in await selector(ex, mode="incentives", competition_weight=D("0.25")).select()
+    }
+    roomy, packed = picked["ROOMY-1"], picked["PACKED-1"]
+    assert roomy.competition and roomy.competition.level == "low"
+    assert packed.competition and packed.competition.level == "high"
+    assert roomy.rank_score == roomy.est_daily_reward * D("1.25")
+    assert packed.rank_score == packed.est_daily_reward * D("0.75")
+
+
+# ------------------------------------------------------------------ fill risk
+
+
+def sweep_trades(ticker: str, n: int, volume: int, leg: Leg = Leg.YES) -> list[Trade]:
+    """``n`` well-separated bursts of ``volume`` contracts over the last few hours."""
+    now = datetime.now(UTC)
+    return [
+        Trade(f"{ticker}-{i}", ticker, D("0.45"), D(volume), leg, now - timedelta(minutes=5 * i))
+        for i in range(1, n + 1)
+    ]
+
+
+async def test_markets_whose_fills_cost_more_than_they_pay_are_dropped(caplog) -> None:
+    tickers = ["SAFE-1", "SWEPT-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("SAFE-1", 100), program("SWEPT-1", 100)]
+    ex.trades["SWEPT-1"] = sweep_trades("SWEPT-1", n=200, volume=5000)  # every burst reaches us
+    caplog.set_level("INFO", logger="kalshi_lp.strategy.selection")
+    picked = await selector(ex, mode="incentives", max_markets=5).select()
+    assert [c.ticker for c in picked] == ["SAFE-1"]
+    assert picked[0].fill_risk is not None and picked[0].fill_risk.fills_per_day == 0
+    assert "fills would cost more than the rewards" in caplog.text
+    assert "fill risk: SWEPT-1" in caplog.text
+
+
+async def test_fill_cost_is_subtracted_before_ranking() -> None:
+    tickers = ["CALM-1", "BUSY-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("CALM-1", 100), program("BUSY-1", 120)]  # BUSY pays 20% more...
+    sel = selector(ex, mode="incentives", max_markets=5)
+    gross = {c.ticker: c for c in await sel.select()}
+    assert [*gross] == ["BUSY-1", "CALM-1"]
+    busy = gross["BUSY-1"]
+    per_fill = busy.quotes[Leg.YES].size * (
+        D("0.07") * busy.quotes[Leg.YES].price * (1 - busy.quotes[Leg.YES].price) + D("0.02")
+    )
+    # ...but enough sweeps through our quote to eat half its reward.
+    n = int(busy.est_daily_reward / 2 / per_fill) + 1
+    ex.trades["BUSY-1"] = sweep_trades("BUSY-1", n=n, volume=5000)
+    net = {c.ticker: c for c in await selector(ex, mode="incentives", max_markets=5).select()}
+    assert [*net] == ["CALM-1", "BUSY-1"]
+    b = net["BUSY-1"]
+    assert b.fill_risk is not None and b.fill_risk.fills_per_day == n * busy.quotes[Leg.YES].size
+    assert b.net_daily_reward == b.est_daily_reward - b.fill_cost_per_day
+    assert b.rank_score == b.net_daily_reward
+
+
+async def test_trade_history_is_cached_and_fetched_incrementally() -> None:
+    ex = FakeExchange([make_market("AAA-1")], {"AAA-1": BOOK})
+    ex.programs = [program("AAA-1", 100)]
+    ex.trades["AAA-1"] = sweep_trades("AAA-1", n=3, volume=10)
+    sel = selector(ex, mode="incentives")
+    await sel.select()
+    await sel.select()
+    (_, first), (_, second) = ex.trade_calls
+    assert first is not None and second is not None
+    assert second - first > 23 * 3600  # the second call only asks for what's new
+
+
+async def test_truncated_history_is_scaled_to_what_it_covers() -> None:
+    ex = FakeExchange([make_market("HOT-1")], {"HOT-1": BOOK})
+    ex.programs = [program("HOT-1", 100)]
+    now = datetime.now(UTC)
+    ex.trades["HOT-1"] = [  # 300 prints in the last 5 minutes: more than the fetch cap
+        Trade(f"h{i}", "HOT-1", D("0.45"), D(1), Leg.YES, now - timedelta(seconds=i))
+        for i in range(300)
+    ]
+    sel = selector(ex, mode="incentives", max_trades_per_market=100, fallback_to_volume=False)
+    await sel.select()
+    history = sel._trades["HOT-1"]
+    assert (now.timestamp() - history.covered_from) < 3600  # not the full 24h
+
+
+async def test_fill_risk_can_be_turned_off() -> None:
+    ex = FakeExchange([make_market("AAA-1")], {"AAA-1": BOOK})
+    ex.programs = [program("AAA-1", 100)]
+    [c] = await selector(ex, mode="incentives", fill_risk=False).select()
+    assert c.fill_risk is None and not ex.trade_calls
+
+
+# --------------------------------------------------- best $/h, capital, switching
+
+
+def capital_selector(exchange: FakeExchange, max_capital: str, **cfg) -> MarketSelector:
+    quoting = QuotingConfig(size=D(4), auto_size=True, max_size=D(10), capital_utilization=D(1))
+    return MarketSelector(
+        exchange,  # type: ignore[arg-type]
+        SelectionConfig(**cfg),
+        quoting,
+        QuoteEngine(quoting, D(50)),
+        max_capital=D(max_capital),
+    )
+
+
+async def test_estimates_use_the_size_the_bot_will_quote() -> None:
+    ex = FakeExchange([make_market("AAA-1")], {"AAA-1": BOOK})
+    ex.programs = [program("AAA-1", 100)]
+    [small] = await selector(ex, mode="incentives").select()  # fixed size 10
+    [auto] = await capital_selector(ex, "1000", mode="incentives").select()  # auto: max_size 10
+    assert auto.size == 10 and small.size == 10
+    quoting = QuotingConfig(size=D(4))
+    [four] = await MarketSelector(
+        ex,  # type: ignore[arg-type]
+        SelectionConfig(mode="incentives"),
+        quoting,
+        QuoteEngine(quoting, D(50)),
+    ).select()
+    assert four.size == 4 and four.est_daily_reward < auto.est_daily_reward
+
+
+async def test_capital_goes_to_the_best_markets_at_full_size() -> None:
+    tickers = ["TOP-1", "MID-1", "LOW-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("TOP-1", 300), program("MID-1", 200), program("LOW-1", 100)]
+    everything = await capital_selector(ex, "1000", mode="incentives").select()
+    assert [c.ticker for c in everything] == tickers  # best $/h first
+    two = sum((c.size * c.pair_cost for c in everything[:2]), D(0))
+    picked = await capital_selector(ex, str(two), mode="incentives").select()
+    assert [c.ticker for c in picked] == ["TOP-1", "MID-1"]  # no budget left for LOW-1
+
+
+async def test_default_margin_switches_to_a_meaningfully_better_market() -> None:
+    tickers = ["APPROVE-OLD", "APPROVE-NEW"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("APPROVE-OLD", 100), program("APPROVE-NEW", 120)]
+    [c] = await selector(ex, mode="incentives", max_per_series=1).select({"APPROVE-OLD": D(0)})
+    assert c.ticker == "APPROVE-NEW"  # 20% better beats the 10% switching margin
+    ex.programs = [program("APPROVE-OLD", 100), program("APPROVE-NEW", 105)]
+    [c] = await selector(ex, mode="incentives", max_per_series=1).select({"APPROVE-OLD": D(0)})
+    assert c.ticker == "APPROVE-OLD"  # 5% better is within estimate noise: stay
+
+
+def test_unpaid_earnings_count_only_if_staying_reaches_the_minimum() -> None:
+    ex = FakeExchange([], {})
+    sel = selector(ex, mode="incentives")
+    now = datetime.now(UTC)
+    reward = RewardParams(
+        D(100), D("0.5"), reward_per_day=D(10), period_end=now + timedelta(days=1)
+    )
+
+    def cand(earned: str, est: str) -> Candidate:
+        return Candidate(make_market("A-1", hours_to_close=48), reward, D(est), D(0), D(earned))
+
+    assert abs(sel._unpaid_bonus(cand("0.90", "2")) - D("0.90")) < D("0.01")  # ~1 day left
+    assert sel._unpaid_bonus(cand("0.90", "0.01")) == 0  # can't reach $1 anyway
+    assert sel._unpaid_bonus(cand("1.20", "2")) == 0  # already over the minimum: paid either way
+    assert sel._unpaid_bonus(cand("0", "2")) == 0
+
+
+async def test_program_list_is_cached_between_scans() -> None:
+    ex = FakeExchange([make_market("AAA-1")], {"AAA-1": BOOK})
+    ex.programs = [program("AAA-1", 100)]
+    sel = selector(ex, mode="incentives")
+    await sel.select()
+    await sel.select()
+    assert ex.program_calls == 1
+    await selector(ex, mode="incentives", catalog_refresh_seconds=0).select()
+    assert ex.program_calls == 2

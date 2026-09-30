@@ -72,6 +72,10 @@ class RunJournal:
             import_legacy_runs(Path(root), self.dir, environment, mode)
         # What earlier runs left behind: the reward ledger, counters, session count.
         self.previous: dict[str, Any] = _read_state(self.dir / "state.json")
+        if self.previous and "rewards_unattributed" not in self.previous and name is None:
+            # Journals imported before this field existed: recompute it from the archive.
+            archived = _legacy_dirs(Path(root) / _LEGACY_ARCHIVE, environment, mode)
+            self.previous["rewards_unattributed"] = _unattributed(archived)
         self.session = int(self.previous.get("session") or 0) + 1
         self._events: TextIO | None = (self.dir / "events.jsonl").open("a", buffering=1)
         self._metrics: TextIO | None = (self.dir / "metrics.jsonl").open("a", buffering=1)
@@ -124,10 +128,7 @@ def import_legacy_runs(root: Path, target: Path, environment: str, mode: str) ->
     """
     now = time.time()
     legacy = []
-    for path in sorted(root.iterdir()) if root.is_dir() else []:
-        m = _LEGACY_RUN.match(path.name)
-        if not (path.is_dir() and m and m["env"] == environment and m["mode"] == mode):
-            continue
+    for path in _legacy_dirs(root, environment, mode):
         state_file = path / "state.json"
         running = _read_state(state_file).get("status") == "running"
         if running and now - state_file.stat().st_mtime < _STALE_AFTER:
@@ -186,6 +187,7 @@ def import_legacy_runs(root: Path, target: Path, environment: str, mode: str) ->
         "session": len(legacy),
         "first_started_at": first_started,
         "ledger": ledger,
+        "rewards_unattributed": _unattributed(legacy),
         "fills_total": fills,
         "requotes_total": requotes,
         "markets": [],
@@ -206,6 +208,34 @@ def import_legacy_runs(root: Path, target: Path, environment: str, mode: str) ->
         archive,
     )
     return len(legacy)
+
+
+def _legacy_dirs(root: Path, environment: str, mode: str) -> list[Path]:
+    if not root.is_dir():
+        return []
+    return [
+        path
+        for path in sorted(root.iterdir())
+        if path.is_dir()
+        and (m := _LEGACY_RUN.match(path.name))
+        and m["env"] == environment
+        and m["mode"] == mode
+    ]
+
+
+def _unattributed(runs: list[Path]) -> float:
+    """Rewards old runs counted in their total but not under any market.
+
+    Older snapshots listed only the markets selected when the run ended, so the
+    earnings of markets dropped mid-run survive only in the run's total.
+    """
+    missing = 0.0
+    for path in runs:
+        state = _read_state(path / "state.json")
+        total = state.get("totals", {}).get("rewards_earned") or 0
+        by_market = sum(row.get("earned") or 0 for row in state.get("markets", []))
+        missing += max(total - by_market, 0.0)
+    return missing
 
 
 class JournalLogHandler(logging.Handler):

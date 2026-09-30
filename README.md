@@ -219,6 +219,25 @@ markets in a series tend to move together. When a market drops out of the select
 still holds a position there, the bot keeps quoting it in reduce-only mode until the position is
 flat.
 
+**Fill risk** (`fill_risk`, on by default). A resting order can't be made fill-proof. What fills
+it is a sweep: a burst of selling that eats every contract queued in front of it faster than the
+bot can move. For the best `fill_risk_pool` candidates, the bot replays the last
+`trade_lookback_hours` of the market's public trades against the quotes it would post. It groups
+prints within `sweep_window_seconds` into sweeps, and counts how much of each sweep would get past
+the depth ahead of us. Each such fill costs the taker fee to exit plus `adverse_move`. Markets are
+then ranked by **net $/day** (estimated reward minus that cost), and any at or below
+`min_net_daily_reward` are dropped. `klp markets` and the dashboard show the fills/day and net
+figures.
+
+**Best $/h, continuously.** The bot rescans every `reselect_interval_seconds` without pausing its
+quoting (the program and market list is reused for `catalog_refresh_seconds`; order books and
+trades are fresh each scan). With `quoting.auto_size`, rewards are estimated at the size the bot
+will really quote, and the capital goes to the highest net $/h markets first, each at `max_size`,
+until `max_capital` is used. Spreading the budget over more markets would only average in worse
+ones. A better market takes a slot once it pays `incumbent_bonus` (10%) more; smaller gaps are
+estimate noise. With `protect_unpaid`, a market holding unpaid earnings below Kalshi's $1 minimum
+counts what leaving would forfeit.
+
 ## Quoting
 
 Each leg (YES bid, NO bid) is priced the same way in its own terms:

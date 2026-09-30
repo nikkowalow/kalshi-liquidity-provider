@@ -71,7 +71,14 @@ async def test_bot_journals_orders_quotes_and_snapshot(tmp_path) -> None:
     assert ("quote", None) in kinds
     assert kinds.count(("order", "place")) == 2
     assert kinds.count(("order", "cancel")) == 2  # shutdown
+    reasons = {(e["action"], e.get("reason")) for e in read_events(journal) if e["type"] == "order"}
+    assert ("cancel", "bot shutting down") in reasons
+    assert all(r for _, r in reasons)  # every place/cancel says why
+    assert any(a == "place" and r.startswith("new quote (reward") for a, r in reasons)
     assert snap["markets"][0]["ticker"] == T
+    [selection] = [e for e in read_events(journal) if e["type"] == "markets"]
+    assert selection["markets"][0]["est_fills_per_day"] == 0  # no trades in the fake
+    assert snap["markets"][0]["net_daily_reward"] == snap["markets"][0]["est_daily_reward"]
     assert snap["markets"][0]["book"]["bid"] == Decimal("0.40")
     assert len(snap["orders"]) == 2
     assert snap["totals"]["rewards_earned"] > 0
@@ -192,7 +199,7 @@ def test_legacy_runs_are_imported_once(tmp_path) -> None:
     _legacy_run(
         tmp_path,
         "20260929-110000-prod-live",
-        0.2,
+        0.25,  # includes $0.05 from a market dropped before the run ended
         [{**row, "earned": 0.2}],
         [{"ts": 3, "type": "metrics", "rewards_earned": 0.2}],
     )
@@ -206,6 +213,7 @@ def test_legacy_runs_are_imported_once(tmp_path) -> None:
     assert ledger["snapshots"] == 20 and ledger["scored"] == 10
     assert ledger["score_sum"] == pytest.approx(4.0) and ledger["title"] == "Alpha"
     assert j.previous["fills_total"] == 1 and j.previous["requotes_total"] == 20
+    assert j.previous["rewards_unattributed"] == pytest.approx(0.05)
     metrics = [json.loads(line) for line in (j.dir / "metrics.jsonl").read_text().splitlines()]
     assert [m["rewards_earned"] for m in metrics] == pytest.approx([0.3, 0.5])  # cumulative
     assert len(read_events(j)) == 3
@@ -288,3 +296,44 @@ def test_dashboard_lists_most_recent_first_and_hides_archive(dashboard) -> None:
         os.utime(root / name / "state.json", (mtime, mtime))
     (root / "_imported").mkdir()
     assert [r["id"] for r in get(base + "/api/runs")] == ["new", "old"]
+
+
+def test_older_import_is_repaired_with_unattributed_rewards(tmp_path) -> None:
+    archive = tmp_path / "_imported"
+    archive.mkdir()
+    _legacy_run(archive, "20260929-100000-prod-live", 0.4, [{"ticker": "A", "earned": 0.1}], [])
+    (tmp_path / "prod-live").mkdir()
+    (tmp_path / "prod-live" / "state.json").write_text(json.dumps({"session": 3, "ledger": {}}))
+    j = RunJournal(tmp_path, "prod", "live")
+    j.close()
+    assert j.previous["rewards_unattributed"] == pytest.approx(0.3)
+
+
+def test_tracker_total_includes_unattributed() -> None:
+    from kalshi_lp.engine.reward_tracker import RewardTracker
+
+    tracker = RewardTracker()
+    tracker.restore({"A": {"earned": 0.5, "snapshots": 3}}, 0.25)
+    assert tracker.total_earned == Decimal("0.75")
+    assert tracker.session_earned == 0
+
+
+async def test_unchanged_scans_are_not_journaled_again(tmp_path) -> None:
+    from kalshi_lp.engine.bot import LiquidityBot
+
+    exchange = FakeExchange(
+        [make_market(T)], {T: make_book(yes=[("0.40", 150)], no=[("0.50", 150)])}
+    )
+    exchange.programs = [program()]
+    journal = RunJournal(tmp_path, "demo", "live")
+    bot = LiquidityBot(
+        settings(selection={"mode": "incentives"}),
+        exchange,
+        feed=FakeFeed(exchange),
+        journal=journal,  # type: ignore[arg-type]
+    )
+    await bot.startup()
+    await bot._reselect_job()
+    await bot._reselect_job()  # same market wins every minute
+    journal.close()
+    assert sum(e["type"] == "markets" for e in read_events(journal)) == 1

@@ -55,6 +55,16 @@ class LoopConfig(_Section):
     )
     reward_report_seconds: float = Field(60, gt=0, description="Log reward estimates this often.")
     reselect_interval_seconds: float = Field(900, gt=0, description="How often to re-rank markets.")
+    reselect_on_pause: bool = Field(
+        True,
+        description=(
+            "When a market gets paused, re-rank early and give its slot to the best other "
+            "market that passes the filters. If none does, the paused market keeps its slot."
+        ),
+    )
+    min_reselect_gap_seconds: float = Field(
+        60, ge=0, description="Early re-ranks (on pause) happen at most this often."
+    )
     status_check_interval_seconds: float = Field(30, gt=0)
 
 
@@ -93,6 +103,79 @@ class SelectionConfig(_Section):
         description="Skip markets with a wider YES spread: their mid is not a fair value.",
     )
     min_daily_reward: Decimal = Field(Decimal("0"), ge=0)
+    competition_weight: Decimal = Field(
+        Decimal("0"),
+        ge=0,
+        le=1,
+        description=(
+            "Prefer uncrowded markets: low-competition markets rank x(1 + w), high ones "
+            "x(1 - w), medium unchanged. Competition is how deep the Target Size reaches below "
+            "the best bid (see strategy.rewards.competition): crowded books force quotes to the "
+            "top, where fills happen, and their reward share flickers."
+        ),
+    )
+    fill_risk: bool = Field(
+        True,
+        description=(
+            "Price in the risk of being filled: replay each top candidate's recent public "
+            "trades against the quotes we'd post (see strategy.fill_risk), and rank by "
+            "estimated reward minus the expected cost of the fills. Markets whose fills would "
+            "cost more than they pay are dropped."
+        ),
+    )
+    fill_risk_pool: int = Field(
+        25, ge=1, description="How many of the best-ranked candidates get their trades checked."
+    )
+    trade_lookback_hours: float = Field(24, gt=0, description="Trade history to replay.")
+    sweep_window_seconds: float = Field(
+        2.0,
+        gt=0,
+        description="Trades this close together count as one sweep (the bot can't react faster).",
+    )
+    max_trades_per_market: int = Field(
+        5000, ge=100, description="Cap on trades fetched per market and check (API budget)."
+    )
+    taker_fee_rate: Decimal = Field(
+        Decimal("0.07"), ge=0, description="Kalshi taker fee: rate x P x (1 - P) per contract."
+    )
+    adverse_move: Decimal = Field(
+        Decimal("0.02"),
+        ge=0,
+        description="Assumed loss per filled contract from the price move that caused the fill.",
+    )
+    min_net_daily_reward: Decimal = Field(
+        Decimal("0"), description="Drop markets whose reward minus fill cost is at or below this."
+    )
+    catalog_refresh_seconds: float = Field(
+        600,
+        ge=0,
+        description=(
+            "How long to reuse the list of programs and their markets between scans. Order "
+            "books (and trades) are always fetched fresh, so scans can run every minute."
+        ),
+    )
+    protect_unpaid: bool = Field(
+        True,
+        description=(
+            "Count what leaving would forfeit: a market we've earned in but not yet up to "
+            "payout_minimum (Kalshi pays nothing below it) gets that amount, spread over its "
+            "remaining time, added to its $/day when compared with other markets. Only if "
+            "staying would actually reach the minimum."
+        ),
+    )
+    payout_minimum: Decimal = Field(
+        Decimal("1"), ge=0, description="Kalshi's minimum payout per market and period, dollars."
+    )
+    incumbent_bonus: Decimal = Field(
+        Decimal("0.1"),
+        ge=0,
+        description=(
+            "Stickiness: markets we already quote, or have earned rewards in, rank as if their "
+            "estimate were this much higher (0.5 = +50%). A newcomer must beat them by that "
+            "margin to take their slot. Switching throws away the queue spot and the progress "
+            "toward Kalshi's $1 minimum payout."
+        ),
+    )
     min_period_payout: Decimal = Field(
         Decimal("0"),
         ge=0,
@@ -121,6 +204,23 @@ class QuotingConfig(_Section):
         description="reward placement: accept this much less share for a deeper, safer price.",
     )
     size: Decimal = Field(Decimal("10"), gt=0, description="Contracts per side.")
+    auto_size: bool = Field(
+        False,
+        description=(
+            "Size quotes to use the capital: split risk.max_capital (less what positions tie up) "
+            "evenly across the markets being quoted, at each market's current prices. "
+            "Capped by max_size and risk.max_position_per_market; `size` is then ignored."
+        ),
+    )
+    max_size: Decimal | None = Field(
+        None, gt=0, description="With auto_size, never quote more than this per side."
+    )
+    capital_utilization: Decimal = Field(
+        Decimal("0.95"),
+        gt=0,
+        le=1,
+        description="With auto_size, the share of the budget to put to work (slack for rounding).",
+    )
     offset_ticks: int = Field(0, ge=0, description="Extra ticks behind the placement price.")
     min_edge: Decimal = Field(
         Decimal("0.01"), ge=0, description="Minimum distance from mid for any quote (dollars)."
@@ -189,6 +289,24 @@ class RiskConfig(_Section):
     )
     fill_burst_window_seconds: float = Field(60, gt=0)
     cooldown_seconds: float = Field(120, ge=0)
+    flatten_on_fill: bool = Field(
+        False,
+        description=(
+            "Never hold a position: when an order fills, cancel that market's quotes and close "
+            "the position at once with an immediate-or-cancel order that crosses the book. "
+            "Costs the spread plus taker fees, but removes directional risk."
+        ),
+    )
+    flatten_slippage: Decimal = Field(
+        Decimal("0.02"),
+        ge=0,
+        description=(
+            "How far through the best price an exit may go (sweeps thin top levels), in dollars."
+        ),
+    )
+    flatten_retry_seconds: float = Field(
+        2.0, gt=0, description="Minimum time between exit attempts in one market."
+    )
     close_buffer_seconds: float = Field(
         900, ge=0, description="Stop quoting this long before a market closes."
     )
