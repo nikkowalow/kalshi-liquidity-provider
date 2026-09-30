@@ -189,9 +189,12 @@ function LineChart({
           {geo.verticals.map((t) => (
             <g key={t}>
               <line x1={geo.x(t)} x2={geo.x(t)} y1={PAD.top} y2={HEIGHT - PAD.bottom} className="grid" />
-              <text x={geo.x(t)} y={HEIGHT - 3} className="axis" textAnchor="middle">
-                {hms(t).slice(0, 5)}
-              </text>
+              {/* skip labels that would collide with the edge labels */}
+              {geo.x(t) > PAD.left + 34 && geo.x(t) < width - PAD.right - 30 && (
+                <text x={geo.x(t)} y={HEIGHT - 3} className="axis" textAnchor="middle">
+                  {hms(t).slice(0, 5)}
+                </text>
+              )}
             </g>
           ))}
           {domain ? (

@@ -1,16 +1,18 @@
-import { useState } from 'react'
+import { memo, useMemo, useRef, useState } from 'react'
 import type { Journal } from '../lib/useJournal'
 import { px, qty, sideClass, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
-import type { FillEvent, MarketsEvent, OrderRow, RunState } from '../types'
+import { useVirtualRows } from '../lib/useVirtualRows'
+import type { FillEvent, LogEvent, MarketsEvent, OrderRow } from '../types'
 import { competitionRoom } from '../lib/competition'
 import { CompetitionTag } from './CompetitionTag'
 import { FillsCell, NetCell } from './FillRiskCells'
 import { span } from '../lib/clock'
 import { Flash } from './Flash'
 import { Chips, Empty, Panel, PanelHeader } from './Panel'
+import { PadRow } from './PadRow'
 import { SortTh } from './SortTh'
 import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
@@ -57,13 +59,9 @@ const FILL_ACCESSORS: Accessors<FillEvent> = {
 
 export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journal: Journal }) {
   const orderSort = useSort('orders')
-  const fillSort = useSort('fills')
   const byTicker = [...orders].sort((a, b) => a.ticker.localeCompare(b.ticker) || a.side.localeCompare(b.side))
   const sorted = sortRows(byTicker, ORDER_ACCESSORS, orderSort.state)
-  const fills = sortRows([...journal.fills].reverse(), FILL_ACCESSORS, fillSort.state).slice(0, 300)
   const freshOrders = useFreshKeys(sorted.map((o) => o.order_id))
-  const fillKey = (f: (typeof fills)[number]) => `${f.ts}-${f.order_id}-${f.count}`
-  const freshFills = useFreshKeys(fills.map(fillKey))
   const inTop = orders.filter((o) => o.in_target === 'in').length
   return (
     <section className="panel span-5">
@@ -144,12 +142,32 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
           </table>
         )}
       </div>
-      <PanelHeader title="Fills" help="panel:fills" note={String(journal.fills.length)} />
-      <div className="body h-sm">
+      <FillsBlock fills={journal.fills} />
+    </section>
+  )
+}
+
+const fillKey = (f: FillEvent) => `${f.ts}-${f.order_id}-${f.count}`
+
+/** Fills only change when one arrives: memoized, and only visible rows are drawn. */
+const FillsBlock = memo(function FillsBlock({ fills: all }: { fills: FillEvent[] }) {
+  const fillSort = useSort('fills')
+  const fills = useMemo(
+    () => sortRows([...all].reverse(), FILL_ACCESSORS, fillSort.state),
+    [all, fillSort.state],
+  )
+  const keys = useMemo(() => fills.map(fillKey), [fills])
+  const freshFills = useFreshKeys(keys)
+  const body = useRef<HTMLDivElement>(null)
+  const win = useVirtualRows(body, fills.length)
+  return (
+    <>
+      <PanelHeader title="Fills" help="panel:fills" note={String(all.length)} />
+      <div className="body h-sm" ref={body}>
         {fills.length === 0 ? (
           <Empty>no fills yet</Empty>
         ) : (
-          <table>
+          <table className="vt">
             <thead>
               <tr>
                 <SortTh k="Time" sorter={fillSort} align="l">
@@ -173,48 +191,87 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
               </tr>
             </thead>
             <tbody>
-              {fills.map((f) => (
-                <tr key={fillKey(f)} className={freshFills.has(fillKey(f)) ? 'row-fill' : undefined}>
-                  <td className="l dim">
-                    <Stamp ts={f.ts} />
-                  </td>
-                  <td className="l">
-                    <Ticker value={f.ticker} />
-                  </td>
-                  <td className={`l ${sideClass(f.side)}`}>
-                    {(f.side ?? '').toUpperCase()}
-                    {f.is_taker && (
-                      <span className="tag neg" data-help="fill:TAKER">
-                        TAKER
-                      </span>
-                    )}
-                  </td>
-                  <td className={sideClass(f.side)}>{px(f.price)}</td>
-                  <td className={sideClass(f.side)}>{qty(f.count)}</td>
-                  <td>{qty(f.post_position)}</td>
-                </tr>
+              <PadRow height={win.padTop} cols={6} />
+              {fills.slice(win.start, win.end).map((f) => (
+                <FillLine key={fillKey(f)} f={f} fresh={freshFills.has(fillKey(f))} />
               ))}
+              <PadRow height={win.padBottom} cols={6} />
             </tbody>
           </table>
         )}
       </div>
-    </section>
+    </>
   )
-}
+})
+
+const FillLine = memo(function FillLine({ f, fresh }: { f: FillEvent; fresh: boolean }) {
+  return (
+    <tr className={fresh ? 'row-fill' : undefined}>
+      <td className="l dim">
+        <Stamp ts={f.ts} />
+      </td>
+      <td className="l">
+        <Ticker value={f.ticker} />
+      </td>
+      <td className={`l ${sideClass(f.side)}`}>
+        {(f.side ?? '').toUpperCase()}
+        {f.is_taker && (
+          <span className="tag neg" data-help="fill:TAKER">
+            TAKER
+          </span>
+        )}
+      </td>
+      <td className={sideClass(f.side)}>{px(f.price)}</td>
+      <td className={sideClass(f.side)}>{qty(f.count)}</td>
+      <td>{qty(f.post_position)}</td>
+    </tr>
+  )
+})
 
 const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const
 type Level = (typeof LEVELS)[number]
 
-export function LogPanel({ journal }: { journal: Journal }) {
+interface KeyedLine {
+  key: string
+  line: LogEvent
+}
+
+/** Log lines newest first, each with a key that stays put as new lines arrive. */
+function keyedLines(logs: LogEvent[], levels: ReadonlySet<Level>): KeyedLine[] {
+  const seen = new Map<string, number>()
+  const out: KeyedLine[] = []
+  for (const line of logs) {
+    const base = `${line.ts}|${line.msg}`
+    const n = seen.get(base) ?? 0
+    seen.set(base, n + 1)
+    if (levels.has(line.level as Level)) out.push({ key: `${base}#${n}`, line })
+  }
+  return out.reverse()
+}
+
+const LogLine = memo(function LogLine({ l, fresh }: { l: LogEvent; fresh: boolean }) {
+  return (
+    <tr className={`${l.level}${fresh ? ' row-new' : ''}`}>
+      <td className="dim">
+        <Stamp ts={l.ts} />
+      </td>
+      <td>{l.level.slice(0, 4)}</td>
+      <td className="dim">{l.logger.replace('kalshi_lp.', '')}</td>
+      <td title={l.msg}>{l.msg}</td>
+    </tr>
+  )
+})
+
+/** Re-renders only on new log lines, a level toggle, or scrolling; draws visible lines only. */
+export const LogPanel = memo(function LogPanel({ logs }: { logs: LogEvent[] }) {
   const [levels, setLevels] = useState<ReadonlySet<Level>>(
     () => new Set<Level>(['INFO', 'WARNING', 'ERROR', 'CRITICAL']),
   )
-  const lines = journal.logs
-    .filter((l) => levels.has(l.level as Level))
-    .slice(-1000)
-    .reverse()
-  const key = (l: (typeof lines)[number]) => `${l.ts}|${l.msg}`
-  const fresh = useFreshKeys(lines.map(key))
+  const lines = useMemo(() => keyedLines(logs, levels), [logs, levels])
+  const keys = useMemo(() => lines.map((l) => l.key), [lines])
+  const fresh = useFreshKeys(keys)
+  const body = useRef<HTMLDivElement>(null)
+  const win = useVirtualRows(body, lines.length)
   return (
     <Panel
       title="Log"
@@ -226,29 +283,25 @@ export function LogPanel({ journal }: { journal: Journal }) {
       }
       span={7}
       height="md"
+      bodyRef={body}
       tools={<Chips options={LEVELS} selected={levels} onToggle={(l) => setLevels((s) => toggled(s, l))} helpPrefix="level" />}
     >
       {lines.length === 0 ? (
         <Empty>nothing logged yet</Empty>
       ) : (
-        <table className="log">
+        <table className="log vt">
           <tbody>
-            {lines.map((l, i) => (
-              <tr key={`${key(l)}-${i}`} className={`${l.level}${fresh.has(key(l)) ? ' row-new' : ''}`}>
-                <td className="dim">
-                  <Stamp ts={l.ts} />
-                </td>
-                <td>{l.level.slice(0, 4)}</td>
-                <td className="dim">{l.logger.replace('kalshi_lp.', '')}</td>
-                <td>{l.msg}</td>
-              </tr>
+            <PadRow height={win.padTop} cols={4} />
+            {lines.slice(win.start, win.end).map(({ key, line }) => (
+              <LogLine key={key} l={line} fresh={fresh.has(key)} />
             ))}
+            <PadRow height={win.padBottom} cols={4} />
           </tbody>
         </table>
       )}
     </Panel>
   )
-}
+})
 
 type Selected = MarketsEvent['markets'][number]
 const SELECTION_ACCESSORS: Accessors<Selected> = {
@@ -262,9 +315,14 @@ const SELECTION_ACCESSORS: Accessors<Selected> = {
   Closes: (m) => (m.close_time ? Date.parse(m.close_time) : null),
 }
 
-export function Selections({ journal }: { journal: Journal }) {
+export const Selections = memo(function Selections({
+  selections: all,
+}: {
+  selections: MarketsEvent[]
+}) {
   const sorter = useSort('selections')
-  const selections = [...journal.selections].reverse()
+  // The newest 50 selections (each is a table); older history stays in the journal file.
+  const selections = useMemo(() => all.slice(-50).reverse(), [all])
   const fresh = useFreshKeys(selections.map((s) => String(s.ts)))
   return (
     <Panel
@@ -338,12 +396,22 @@ export function Selections({ journal }: { journal: Journal }) {
       )}
     </Panel>
   )
-}
+})
 
-export function RunConfig({ journal, state }: { journal: Journal; state: RunState | null }) {
-  const { start, end } = journal
-  const config = state?.config ?? start?.config // older journals only have it in run_start
-  const session = state?.session ?? start?.session
+export const RunConfig = memo(function RunConfig({
+  start,
+  end,
+  configText,
+  stateSession,
+}: {
+  start: Journal['start']
+  end: Journal['end']
+  configText: string | null // the live snapshot's config as JSON (a string: stable between polls)
+  stateSession: number | undefined
+}) {
+  // Older journals only have the config in run_start.
+  const text = configText ?? (start?.config ? JSON.stringify(start.config, null, 2) : null)
+  const session = stateSession ?? start?.session
   const note = (
     <>
       {[session != null ? `session ${session}` : '', start ? `${start.environment} · ${start.mode} · ${start.api_url}` : '']
@@ -365,7 +433,7 @@ export function RunConfig({ journal, state }: { journal: Journal; state: RunStat
   )
   return (
     <Panel title="Run config" help="panel:config" note={note} height="sm">
-      <pre>{config ? JSON.stringify(config, null, 2) : '—'}</pre>
+      <pre>{text ?? '—'}</pre>
     </Panel>
   )
-}
+})

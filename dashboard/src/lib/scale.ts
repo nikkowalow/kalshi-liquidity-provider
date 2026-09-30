@@ -120,14 +120,14 @@ export function scaleSamples(samples: Sample[], n: number, rf: number): Sample[]
   return samples.map((s) => ({ t: s.t, totals: scaleTotals(s.totals, n, rf) }))
 }
 
-export interface Scaled {
+export interface ScaledState {
   state: RunState | null
-  journal: Journal
   rewardFactor: number // overall reward multiplier actually applied
 }
 
-export function scaleView(state: RunState | null, journal: Journal, n: number): Scaled {
-  if (n === 1 || !state) return { state, journal, rewardFactor: 1 }
+/** The snapshot under the multiplier. Runs every second, so it touches only the state. */
+export function scaleState(state: RunState | null, n: number): ScaledState {
+  if (n === 1 || !state) return { state, rewardFactor: 1 }
   const f = factors(state.markets, n)
   const factorOf = (ticker: string) => f.byTicker.get(ticker) ?? f.overall
 
@@ -159,33 +159,58 @@ export function scaleView(state: RunState | null, journal: Journal, n: number): 
     markets,
     orders: state.orders.map((o) => ({ ...o, size: o.size * n })),
   }
+  return { state: scaledState, rewardFactor: f.overall }
+}
 
-  const scaledJournal: Journal = {
+// Scaled copies of the journal's lists, reused until the list itself changes, so panels
+// that only show (say) fills don't re-render when a log line arrives.
+const cache = new WeakMap<object, { key: string; value: unknown }>()
+function reuse<R>(list: object, key: string, make: () => R): R {
+  const hit = cache.get(list)
+  if (hit && hit.key === key) return hit.value as R
+  const value = make()
+  cache.set(list, { key, value })
+  return value
+}
+
+/** The journal under the multiplier. ``rf`` is the overall reward factor (pass it rounded,
+ *  so the lists aren't rebuilt for every tiny change in the live factor). */
+export function scaleJournal(journal: Journal, n: number, rf: number): Journal {
+  if (n === 1) return journal
+  const key = `${n}|${rf}`
+  return {
     ...journal,
-    orders: journal.orders.map((o) => ({ ...o, size: lin(o.size, n) })),
-    fills: journal.fills.map((fl) => ({
-      ...fl,
-      count: linStr(fl.count, n),
-      post_position: linStr(fl.post_position, n),
-    })),
-    quotes: journal.quotes.map((q) => {
-      const rf = rewardFactor(q.yes.share, q.no.share, n) ?? factorOf(q.ticker)
-      return {
-        ...q,
-        position: q.position * n,
-        yes: scaleLeg(q.yes, n) as LegQuote,
-        no: scaleLeg(q.no, n) as LegQuote,
-        est_daily_reward: q.est_daily_reward * rf,
-      }
-    }),
-    metrics: journal.metrics.map((m) => scaleTotals(m, n, f.overall) as MetricsEvent),
-    selections: journal.selections.map((s) => ({
-      ...s,
-      markets: s.markets.map((m) => {
-        const scaled = scaleFillRisk(m, n, factorOf(m.ticker))
-        return { ...scaled, est_daily_reward: scaled.est_daily_reward ?? m.est_daily_reward }
+    orders: reuse(journal.orders, key, () => journal.orders.map((o) => ({ ...o, size: lin(o.size, n) }))),
+    fills: reuse(journal.fills, key, () =>
+      journal.fills.map((fl) => ({
+        ...fl,
+        count: linStr(fl.count, n),
+        post_position: linStr(fl.post_position, n),
+      })),
+    ),
+    quotes: reuse(journal.quotes, key, () =>
+      journal.quotes.map((q) => {
+        const f = rewardFactor(q.yes.share, q.no.share, n) ?? rf
+        return {
+          ...q,
+          position: q.position * n,
+          yes: scaleLeg(q.yes, n) as LegQuote,
+          no: scaleLeg(q.no, n) as LegQuote,
+          est_daily_reward: q.est_daily_reward * f,
+        }
       }),
-    })),
+    ),
+    metrics: reuse(journal.metrics, key, () =>
+      journal.metrics.map((m) => scaleTotals(m, n, rf) as MetricsEvent),
+    ),
+    selections: reuse(journal.selections, key, () =>
+      journal.selections.map((s) => ({
+        ...s,
+        markets: s.markets.map((m) => {
+          const scaled = scaleFillRisk(m, n, rf)
+          return { ...scaled, est_daily_reward: scaled.est_daily_reward ?? m.est_daily_reward }
+        }),
+      })),
+    ),
   }
-  return { state: scaledState, journal: scaledJournal, rewardFactor: f.overall }
 }

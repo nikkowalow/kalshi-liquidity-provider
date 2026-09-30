@@ -8,7 +8,7 @@ import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/Si
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
 import { useEffect, useMemo } from 'react'
-import { scaleSamples, scaleView } from './lib/scale'
+import { scaleJournal, scaleSamples, scaleState } from './lib/scale'
 import { useJournal } from './lib/useJournal'
 import { useMultiplier } from './lib/useMultiplier'
 
@@ -17,9 +17,16 @@ export default function App() {
   const { runs, runId, chooseRun, follow, setFollow, connected } = raw
   const [multiplier, setMultiplier] = useMultiplier()
   // Everything below sees the projected numbers; the multiplier is display-only.
-  const { state, journal, rewardFactor } = useMemo(
-    () => scaleView(raw.state, raw.journal, multiplier),
-    [raw.state, raw.journal, multiplier],
+  const { state, rewardFactor } = useMemo(
+    () => scaleState(raw.state, multiplier),
+    [raw.state, multiplier],
+  )
+  // The journal only changes when events arrive; keep it (and its lists) stable between
+  // snapshots so the panels built from it can skip the once-a-second re-render.
+  const journalFactor = Math.round(rewardFactor * 100) / 100
+  const journal = useMemo(
+    () => scaleJournal(raw.journal, multiplier, journalFactor),
+    [raw.journal, multiplier, journalFactor],
   )
   useEffect(() => {
     document.body.classList.toggle('simulated', multiplier !== 1) // projected numbers turn yellow
@@ -29,7 +36,11 @@ export default function App() {
     () => scaleSamples(raw.live, multiplier, rewardFactor),
     [raw.live, multiplier, rewardFactor],
   )
-  const rejects = journal.orders.filter((o) => o.action === 'reject').length
+  const configText = state?.config ? JSON.stringify(state.config, null, 2) : null
+  const rejects = useMemo(
+    () => journal.orders.filter((o) => o.action === 'reject').length,
+    [journal.orders],
+  )
 
   return (
     <>
@@ -46,16 +57,21 @@ export default function App() {
         rewardFactor={rewardFactor}
       />
       <Kpis state={state} fills={journal.fills.length} rejects={rejects} live={live} />
-      <Tape journal={journal} />
+      <Tape fills={journal.fills} orders={journal.orders} logs={journal.logs} />
       <div className="grid">
         <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} />
         <Charts journal={journal} state={state} live={live} />
         <EarningsMix state={state} />
-        <Blotter journal={journal} />
+        <Blotter orders={journal.orders} fills={journal.fills} quotes={journal.quotes} />
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />
-        <LogPanel journal={journal} />
-        <Selections journal={journal} />
-        <RunConfig journal={journal} state={state} />
+        <LogPanel logs={journal.logs} />
+        <Selections selections={journal.selections} />
+        <RunConfig
+          start={journal.start}
+          end={journal.end}
+          configText={configText}
+          stateSession={state?.session}
+        />
       </div>
       <div className="foot">
         kalshi-lp · reads runs/&lt;run&gt;/state.json + events.jsonl via dashboard/server.py · polls

@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useRef, useState } from 'react'
 import type { Journal } from '../lib/useJournal'
 import { kindClass, px, qty, sideClass, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
+import { useVirtualRows } from '../lib/useVirtualRows'
 import type { LegQuote } from '../types'
 import { Chips, Empty, Panel } from './Panel'
 import { SortTh } from './SortTh'
+import { PadRow } from './PadRow'
 import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
 
@@ -29,7 +31,9 @@ interface BlotterRow {
 const legText = (q: LegQuote) =>
   q.price === null ? `— (${q.reason})` : `${qty(q.size)}@${px(q.price)}`
 
-function rows(journal: Journal): BlotterRow[] {
+type Lists = Pick<Journal, 'orders' | 'fills' | 'quotes'>
+
+function rows(journal: Lists): BlotterRow[] {
   const out: BlotterRow[] = []
   journal.orders.forEach((o, i) =>
     out.push({
@@ -94,15 +98,58 @@ const ACCESSORS: Accessors<BlotterRow> = {
   Info: (r) => r.info || null,
 }
 
-export function Blotter({ journal }: { journal: Journal }) {
+const BlotterLine = memo(function BlotterLine({ r, fresh }: { r: BlotterRow; fresh: boolean }) {
+  return (
+    <tr className={fresh ? (r.kind === 'fill' ? 'row-fill' : 'row-new') : undefined}>
+      <td className="l dim">
+        <Stamp ts={r.ts} />
+      </td>
+      <td className={`l ${kindClass(r.kind)}`} data-help={`type:${r.kind}`}>
+        {r.kind.toUpperCase()}
+      </td>
+      <td className="l">
+        <Ticker value={r.ticker} />
+      </td>
+      <td className={`l ${sideClass(r.side)}`}>{r.side.toUpperCase()}</td>
+      <td className={sideClass(r.side)}>{r.price === null ? '' : px(r.price)}</td>
+      <td className={sideClass(r.side)}>{r.size === null ? '' : qty(r.size)}</td>
+      <td className="l reason" title={r.reason}>
+        {r.reason}
+      </td>
+      <td className="l dim">
+        {r.quote ? (
+          <>
+            bid <span className="bid">{r.quote.bid}</span> · ask <span className="ask">{r.quote.ask}</span>
+            {r.quote.rest}
+          </>
+        ) : (
+          r.info
+        )}
+      </td>
+    </tr>
+  )
+})
+
+/** Only re-renders when the journal (new events), a filter, the sort or the scroll changes. */
+export const Blotter = memo(function Blotter({ orders, fills, quotes }: Lists) {
   const sorter = useSort('blotter')
   const [kinds, setKinds] = useState<ReadonlySet<Kind>>(() => new Set(KINDS))
   const [query, setQuery] = useState('')
-  const all = useMemo(() => rows(journal), [journal])
+  const all = useMemo(() => rows({ orders, fills, quotes }), [orders, fills, quotes])
+  const ids = useMemo(() => all.map((r) => r.id), [all])
   const q = query.trim().toUpperCase()
-  const matching = all.filter((r) => kinds.has(r.kind) && (!q || r.ticker.toUpperCase().includes(q)))
-  const shown = sortRows(matching, ACCESSORS, sorter.state).slice(0, 800)
-  const fresh = useFreshKeys(all.map((r) => r.id))
+  const shown = useMemo(
+    () =>
+      sortRows(
+        all.filter((r) => kinds.has(r.kind) && (!q || r.ticker.toUpperCase().includes(q))),
+        ACCESSORS,
+        sorter.state,
+      ),
+    [all, kinds, q, sorter.state],
+  )
+  const fresh = useFreshKeys(ids)
+  const body = useRef<HTMLDivElement>(null)
+  const win = useVirtualRows(body, shown.length)
 
   return (
     <Panel
@@ -111,6 +158,7 @@ export function Blotter({ journal }: { journal: Journal }) {
       note={`${shown.length} shown`}
       span={7}
       height="lg"
+      bodyRef={body}
       tools={
         <>
           <Chips options={KINDS} selected={kinds} onToggle={(k) => setKinds((s) => toggled(s, k))} helpPrefix="type" colorClass={kindClass} />
@@ -126,7 +174,7 @@ export function Blotter({ journal }: { journal: Journal }) {
       {shown.length === 0 ? (
         <Empty>no activity yet</Empty>
       ) : (
-        <table>
+        <table className="vt">
           <thead>
             <tr>
               <SortTh k="Time" sorter={sorter} align="l">
@@ -156,39 +204,14 @@ export function Blotter({ journal }: { journal: Journal }) {
             </tr>
           </thead>
           <tbody>
-            {shown.map((r) => (
-              <tr key={r.id} className={fresh.has(r.id) ? (r.kind === 'fill' ? 'row-fill' : 'row-new') : undefined}>
-                <td className="l dim">
-                  <Stamp ts={r.ts} />
-                </td>
-                <td className={`l ${kindClass(r.kind)}`} data-help={`type:${r.kind}`}>
-                  {r.kind.toUpperCase()}
-                </td>
-                <td className="l">
-                  <Ticker value={r.ticker} />
-                </td>
-                <td className={`l ${sideClass(r.side)}`}>{r.side.toUpperCase()}</td>
-                <td className={sideClass(r.side)}>{r.price === null ? '' : px(r.price)}</td>
-                <td className={sideClass(r.side)}>{r.size === null ? '' : qty(r.size)}</td>
-                <td className="l reason" title={r.reason}>
-                  {r.reason}
-                </td>
-                <td className="l dim">
-                  {r.quote ? (
-                    <>
-                      bid <span className="bid">{r.quote.bid}</span> · ask{' '}
-                      <span className="ask">{r.quote.ask}</span>
-                      {r.quote.rest}
-                    </>
-                  ) : (
-                    r.info
-                  )}
-                </td>
-              </tr>
+            <PadRow height={win.padTop} cols={8} />
+            {shown.slice(win.start, win.end).map((r) => (
+              <BlotterLine key={r.id} r={r} fresh={fresh.has(r.id)} />
             ))}
+            <PadRow height={win.padBottom} cols={8} />
           </tbody>
         </table>
       )}
     </Panel>
   )
-}
+})

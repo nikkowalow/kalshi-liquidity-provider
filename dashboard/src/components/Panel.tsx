@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 
 interface PanelProps {
   title: string
@@ -7,15 +7,18 @@ interface PanelProps {
   tools?: ReactNode
   span?: 4 | 5 | 6 | 7 | 8 | 12
   height?: 'sm' | 'md' | 'lg'
+  bodyRef?: Ref<HTMLDivElement> // the scrolling body (for virtualized tables)
   children: ReactNode
 }
 
 /** A titled terminal panel with a scrollable body. */
-export function Panel({ title, help, note, tools, span = 12, height, children }: PanelProps) {
+export function Panel({ title, help, note, tools, span = 12, height, bodyRef, children }: PanelProps) {
   return (
     <section className={`panel span-${span}`}>
       <PanelHeader title={title} help={help} note={note} tools={tools} />
-      <div className={`body${height ? ` h-${height}` : ''}`}>{children}</div>
+      <div ref={bodyRef} className={`body${height ? ` h-${height}` : ''}`}>
+        {children}
+      </div>
     </section>
   )
 }

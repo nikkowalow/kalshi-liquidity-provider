@@ -12,29 +12,43 @@ export function HelpLayer() {
   const box = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const over = (ev: MouseEvent) => {
-      const el = (ev.target as Element | null)?.closest<HTMLElement>('[data-help]')
-      setEntry(el?.dataset.help ? helpFor(el.dataset.help) : null)
-    }
-    const move = (ev: MouseEvent) => {
+    let key: string | undefined
+    let frame = 0
+    let mouse = { x: 0, y: 0 }
+    const place = () => {
+      frame = 0
       const el = box.current
-      if (!el) return
+      if (!el || key === undefined) return // hidden: don't touch layout at all
       const pad = 14
-      let x = ev.clientX + pad
-      let y = ev.clientY + pad
-      if (x + el.offsetWidth > window.innerWidth - 4) x = ev.clientX - el.offsetWidth - pad
-      if (y + el.offsetHeight > window.innerHeight - 4) y = ev.clientY - el.offsetHeight - pad
+      let x = mouse.x + pad
+      let y = mouse.y + pad
+      if (x + el.offsetWidth > window.innerWidth - 4) x = mouse.x - el.offsetWidth - pad
+      if (y + el.offsetHeight > window.innerHeight - 4) y = mouse.y - el.offsetHeight - pad
       el.style.left = `${Math.max(4, x)}px`
       el.style.top = `${Math.max(4, y)}px`
     }
-    const leave = () => setEntry(null)
-    document.addEventListener('mouseover', over)
-    document.addEventListener('mousemove', move)
+    const over = (ev: MouseEvent) => {
+      const next = (ev.target as Element | null)?.closest<HTMLElement>('[data-help]')?.dataset.help
+      if (next === key) return // same label: nothing to update
+      key = next
+      setEntry(next ? helpFor(next) : null)
+    }
+    const move = (ev: MouseEvent) => {
+      mouse = { x: ev.clientX, y: ev.clientY }
+      if (key !== undefined && !frame) frame = requestAnimationFrame(place) // once per frame
+    }
+    const leave = () => {
+      key = undefined
+      setEntry(null)
+    }
+    document.addEventListener('mouseover', over, { passive: true })
+    document.addEventListener('mousemove', move, { passive: true })
     document.documentElement.addEventListener('mouseleave', leave)
     return () => {
       document.removeEventListener('mouseover', over)
       document.removeEventListener('mousemove', move)
       document.documentElement.removeEventListener('mouseleave', leave)
+      if (frame) cancelAnimationFrame(frame)
     }
   }, [])
 

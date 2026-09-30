@@ -196,6 +196,10 @@ th[data-help], .k[data-help], .t[data-help], h2 > span[data-help], .help-u { tex
 .tape-item::before { content: "▸ "; color: var(--accent-dim); }
 @keyframes tape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
+/* Virtualized tables: fixed row height so only visible rows need drawing (useVirtualRows). */
+.vt tbody tr:not(.pad) { height: 18px; }
+.vt td { overflow: hidden; text-overflow: ellipsis; }
+
 /* ------------------------------------------------------------------ live */
 /* Top bar: spinner plus an LED that blinks on every snapshot received. No glows anywhere. */
 .rx { display: inline-flex; align-items: center; gap: 5px; }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { num, pct, px, qty, signClass, signedUsd, usd } from '../lib/format'
 import { useFreshKeys } from '../lib/useFreshKeys'
@@ -144,7 +144,16 @@ function sideRank(orders: OrderRow[], leg: 'yes' | 'no') {
   return mine.sort((a, b) => (a.ahead_total ?? 0) - (b.ahead_total ?? 0))[0]
 }
 
-function Row({ m, orders, fresh }: { m: MarketRow; orders: OrderRow[]; fresh: boolean }) {
+interface RowProps {
+  m: MarketRow
+  orders: OrderRow[]
+  fresh: boolean
+  sig: string // everything the row shows; unchanged signature = skip re-rendering it
+}
+
+const Row = memo(RowView, (a, b) => a.sig === b.sig && a.fresh === b.fresh)
+
+function RowView({ m, orders, fresh }: RowProps) {
   const b = m.book
   const spread = b && b.bid !== null && b.ask !== null ? b.ask - b.bid : null
   const { yes, no } = m.quotes
@@ -298,6 +307,7 @@ export function MarketsTable({ markets: all, orders }: { markets: MarketRow[]; o
                 m={m}
                 orders={byTicker.get(m.ticker) ?? []}
                 fresh={fresh.has(m.ticker)}
+                sig={JSON.stringify(m) + JSON.stringify(byTicker.get(m.ticker))}
               />
             ))}
           </tbody>
