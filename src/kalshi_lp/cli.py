@@ -203,9 +203,14 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     signer = build_signer(settings)
     async with build_client(settings, signer) as client:
         journal = RunJournal(
-            settings.runs_dir, settings.environment.value, "dry" if settings.dry_run else "live"
+            settings.runs_dir,
+            settings.environment.value,
+            "dry" if settings.dry_run else "live",
+            name=args.journal,
         )
-        log.info("journal: %s (view with: make dashboard)", journal.dir)
+        log.info(
+            "journal: %s, session %d (view with: make dashboard)", journal.dir, journal.session
+        )
         bot = LiquidityBot(settings, client, signer=signer, journal=journal)
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -267,6 +272,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="required to trade live in the production (real money) environment",
     )
     run.add_argument("--duration", type=float, default=None, help="stop after N seconds")
+    run.add_argument(
+        "--journal",
+        default=None,
+        metavar="NAME",
+        help="journal under runs/ to append to (default: <env>-<mode>, e.g. prod-live; "
+        "use a new name to start a fresh history)",
+    )
 
     cancel = sub.add_parser("cancel", parents=[common], help="cancel the bot's resting orders")
     cancel.add_argument(

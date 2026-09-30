@@ -14,6 +14,9 @@ import type {
 } from '../types'
 
 const MAX_EVENTS = 5000
+const MAX_METRICS = 20000 // ~2 days at one sample per 10s; older history comes thinned from /metrics
+const HISTORY_POINTS = 2000
+const TAIL_BYTES = 3_000_000 // first load: only the recent end of a long journal
 const POLL_MS = 1000
 const RUNS_POLL_MS = 3000
 
@@ -39,8 +42,8 @@ const emptyJournal = (): Journal => ({
   end: null,
 })
 
-function append<T>(list: T[], item: T): T[] {
-  const next = list.length >= MAX_EVENTS ? list.slice(list.length - MAX_EVENTS + 1) : list.slice()
+function append<T>(list: T[], item: T, max = MAX_EVENTS): T[] {
+  const next = list.length >= max ? list.slice(list.length - max + 1) : list.slice()
   next.push(item)
   return next
 }
@@ -65,7 +68,9 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
         j = { ...j, selections: append(j.selections, e) }
         break
       case 'metrics':
-        j = { ...j, metrics: append(j.metrics, e) }
+        // Skip samples the thinned history already covers.
+        if (j.metrics.length && e.ts <= j.metrics[j.metrics.length - 1].ts) break
+        j = { ...j, metrics: append(j.metrics, e, MAX_METRICS) }
         break
       case 'ws':
         // Connection changes show up in the log panel.
@@ -81,7 +86,7 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
         }
         break
       case 'run_start':
-        j = { ...j, start: e }
+        j = { ...j, start: e, end: null } // a restart continues the same journal
         break
       case 'run_end':
         j = { ...j, end: e }
@@ -105,12 +110,12 @@ export function useJournal() {
   const [state, setState] = useState<RunState | null>(null)
   const [journal, setJournal] = useState<Journal>(emptyJournal)
   const [connected, setConnected] = useState(true)
-  const offset = useRef(0)
+  const offset = useRef<number | null>(null) // null: not loaded yet, start from the tail
   const activeRun = useRef<string | null>(null)
 
   const selectRun = useCallback((id: string | null) => {
     activeRun.current = id
-    offset.current = 0
+    offset.current = null
     setRunId(id)
     setState(null)
     setJournal(emptyJournal())
@@ -150,15 +155,25 @@ export function useJournal() {
       if (busy) return
       busy = true
       try {
-        const [snapshot, batch] = await Promise.all([
+        const first = offset.current === null
+        const [snapshot, batch, history] = await Promise.all([
           getJSON<RunState>(`/api/runs/${runId}/state`),
           getJSON<{ events: JournalEvent[]; offset: number }>(
-            `/api/runs/${runId}/events?offset=${offset.current}`,
+            first
+              ? `/api/runs/${runId}/events?tail=${TAIL_BYTES}`
+              : `/api/runs/${runId}/events?offset=${offset.current}`,
           ),
+          first
+            ? // Optional: an older server has no /metrics; the charts then fill from events.
+              getJSON<MetricsEvent[]>(`/api/runs/${runId}/metrics?points=${HISTORY_POINTS}`).catch(
+                () => null,
+              )
+            : Promise.resolve(null),
         ])
         if (cancelled || activeRun.current !== runId) return
         offset.current = batch.offset
         setState(snapshot)
+        if (history) setJournal((j) => ({ ...j, metrics: history }))
         if (batch.events.length) setJournal((j) => ingest(j, batch.events))
         setConnected(true)
       } catch {

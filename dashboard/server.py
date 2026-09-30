@@ -15,9 +15,11 @@ Serves two things:
 Binds to localhost only: the journal shows your positions and orders.
 
 API
-    GET /api/runs                           runs, newest first
+    GET /api/runs                           runs, most recently updated first
     GET /api/runs/<id>/state                latest snapshot
     GET /api/runs/<id>/events?offset=N      events appended since byte offset N
+    GET /api/runs/<id>/events?tail=N        roughly the last N bytes of events (first load)
+    GET /api/runs/<id>/metrics?points=N     the totals history, thinned to about N points
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from urllib.parse import parse_qs, urlsplit
 HERE = Path(__file__).resolve().parent
 RUN_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 MAX_CHUNK = 2_000_000  # bytes of events per response
+MAX_POINTS = 5000
 RUNNING_WITHIN = 5.0  # seconds since last state write to count as running
 
 
@@ -84,8 +87,14 @@ class Handler(BaseHTTPRequestHandler):
             elif parts[3] == "state":
                 self.send_state(run)
             elif parts[3] == "events":
-                offset = int(parse_qs(url.query).get("offset", ["0"])[0])
-                self.send_events(run, offset)
+                query = parse_qs(url.query)
+                if "tail" in query:
+                    self.send_events(run, self.tail_offset(run, int(query["tail"][0])))
+                else:
+                    self.send_events(run, int(query.get("offset", ["0"])[0]))
+            elif parts[3] == "metrics":
+                points = int(parse_qs(url.query).get("points", ["2000"])[0])
+                self._json(self.metrics(run, min(max(points, 2), MAX_POINTS)))
             else:
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         else:
@@ -111,8 +120,8 @@ class Handler(BaseHTTPRequestHandler):
     def list_runs(self) -> list[dict[str, object]]:
         runs = []
         if self.runs_dir.is_dir():
-            for path in sorted(self.runs_dir.iterdir(), reverse=True):
-                if not path.is_dir():
+            for path in self.runs_dir.iterdir():
+                if not path.is_dir() or path.name.startswith(("_", ".")):
                     continue
                 state = path / "state.json"
                 updated = state.stat().st_mtime if state.exists() else path.stat().st_mtime
@@ -122,7 +131,40 @@ class Handler(BaseHTTPRequestHandler):
                 if status == "running" and time.time() - updated > RUNNING_WITHIN:
                     status = "stale"
                 runs.append({"id": path.name, "updated_at": updated, "status": status})
+        runs.sort(key=lambda r: float(r["updated_at"]), reverse=True)  # type: ignore[arg-type]
         return runs
+
+    @staticmethod
+    def tail_offset(run: Path, tail: int) -> int:
+        """Byte offset of the first full line in the last ``tail`` bytes of the events."""
+        path = run / "events.jsonl"
+        if not path.exists():
+            return 0
+        start = max(path.stat().st_size - max(tail, 0), 0)
+        if start == 0:
+            return 0
+        with path.open("rb") as f:
+            f.seek(start - 1)
+            if f.read(1) == b"\n":
+                return start
+            f.readline()  # skip the partial line
+            return f.tell()
+
+    @staticmethod
+    def metrics(run: Path, points: int) -> list[dict[str, object]]:
+        """Metrics history, evenly thinned to at most ``points`` (always keeping the last)."""
+        path = run / "metrics.jsonl"
+        if not path.exists():
+            return []
+        rows = []
+        with path.open("rb") as f:
+            for line in f:
+                with contextlib.suppress(ValueError):
+                    rows.append(json.loads(line))
+        if len(rows) <= points:
+            return rows
+        step = len(rows) / (points - 1)
+        return [rows[int(i * step)] for i in range(points - 1)] + [rows[-1]]
 
     def send_state(self, run: Path) -> None:
         try:

@@ -5,6 +5,7 @@ import { toggled } from '../lib/sets'
 import { useFreshKeys } from '../lib/useFreshKeys'
 import type { LegQuote } from '../types'
 import { Chips, Empty, Panel } from './Panel'
+import { Ticker } from './Ticker'
 
 const KINDS = ['place', 'cancel', 'decrease', 'reject', 'fill', 'quote'] as const
 type Kind = (typeof KINDS)[number]
@@ -128,7 +129,9 @@ export function Blotter({ journal }: { journal: Journal }) {
                 <td className={`l ${KIND_CLASS[r.kind]}`} data-help={`type:${r.kind}`}>
                   {r.kind.toUpperCase()}
                 </td>
-                <td className="l">{r.ticker}</td>
+                <td className="l">
+                  <Ticker value={r.ticker} />
+                </td>
                 <td className="l">{r.side.toUpperCase()}</td>
                 <td>{r.price === null ? '' : px(r.price)}</td>
                 <td>{r.size === null ? '' : qty(r.size)}</td>

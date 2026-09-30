@@ -13,20 +13,20 @@ export const HELP: Record<string, HelpEntry> = {
   "kpi:Balance": ["Balance", "Cash in your Kalshi account, as reported by Kalshi. Refreshed every 15 seconds."],
   "kpi:Capital in use": ["Capital in use", "Money the bot has tied up: what it paid for its positions, plus the cash Kalshi holds for its open orders. Sell orders against contracts you already own don't count, since they need no extra cash.",
     "Compared against max_capital. BINDING means the cap is being hit and new orders are shrunk or skipped to stay under it."],
-  "kpi:Session P&L": ["Session P&L", "Profit or loss since this run started, in the markets the bot trades. Open positions are valued at the current mid price, and fees are subtracted.",
+  "kpi:Session P&L": ["Session P&L", "Profit or loss since the bot last started (this session), in the markets the bot trades. Open positions are valued at the current mid price, and fees are subtracted.",
     "Mostly unrealized: it moves with prices until you sell or the market settles. The bot stops itself if this falls below -max_session_loss."],
-  "kpi:Est. rewards": ["Estimated rewards", "The bot's estimate of the liquidity-program rewards earned this run. Once a second it replays Kalshi's scoring on the live order book, using your orders' real place in the queue.",
+  "kpi:Est. rewards": ["Estimated rewards", "The bot's estimate of the liquidity-program rewards earned, totalled across every session of this journal (restarts don't reset it); the line underneath shows this session alone. Once a second it replays Kalshi's scoring on the live order book, using your orders' real place in the queue.",
     "An estimate, not Kalshi's number. Kalshi pays after each program period ends, and doesn't pay amounts under $1."],
   "kpi:Reward rate": ["Reward rate", "Estimated rewards earned over roughly the last 10 minutes, as dollars per hour. The small line underneath projects that rate over a full day."],
   "kpi:Exposure": ["Exposure", "The total you paid for the positions you currently hold (their cost basis)."],
   "kpi:Resting": ["Resting orders", "How many of the bot's orders are sitting on the order book right now, waiting to be filled."],
-  "kpi:Fills": ["Fills", "How many times one of the bot's orders traded this run. Rejected means Kalshi refused an order, usually because it would have traded immediately (the bot only posts orders that rest on the book)."],
+  "kpi:Fills": ["Fills", "How many times one of the bot's orders traded, across all sessions. Rejected means Kalshi refused an order, usually because it would have traded immediately (the bot only posts orders that rest on the book)."],
   "kpi:Requotes": ["Requotes", "How many times the bot recalculated its quotes. It does this whenever an order book, one of its orders, or its position changes, and every few seconds anyway."],
   "kpi:Feed": ["Feed", "WS UP: the live market-data connection to Kalshi is working. If it drops, the bot can't see prices, so it pulls its orders until the connection is back. The second line says whether Kalshi trading is open."],
   "kpi:Halt": ["Halt", "A risk limit stopped the bot and it cancelled all its orders. The reason is shown. Restart the bot to resume."],
 
   // panels & charts
-  "panel:markets": ["Markets", "One row per market the bot is quoting. Every price is in YES terms: 0.30 means $0.30 per contract, and a contract pays $1 if its outcome happens."],
+  "panel:markets": ["Markets", "One row per market the bot is quoting, then (dimmed, tagged PAST) markets it quoted earlier. Every price is in YES terms: 0.30 means $0.30 per contract, and a contract pays $1 if its outcome happens."],
   "panel:performance": ["Performance", "How this run is going over time, sampled every 10 seconds. Hover a chart to see exact values."],
   "chart:rewards": ["Est. rewards earned", "Running total of the bot's estimated program rewards this run. The steeper the line, the faster you're earning."],
   "chart:pnl": ["Session P&L", "Trading profit or loss over time, valued at mid prices (not including rewards). Dips usually mean you were filled and the price then moved against you. The dashed line is $0."],
@@ -55,12 +55,15 @@ export const HELP: Record<string, HelpEntry> = {
   "col:Target": ["Target size", "The program's order-book depth that counts. Only the first N contracts of depth on each side (walking down from the best price) earn anything. If either side has less than this, that second pays nobody."],
   "col:Share Y/N": ["Share YES / NO", "Your estimated share of the reward on the YES side and on the NO side, for the current book.",
     "Your $/day is roughly Program $/day × (YES share + NO share) ÷ 2."],
-  "col:Earned": ["Earned", "The bot's estimate of rewards earned in this market this run."],
+  "col:Earned": ["Earned", "The bot's estimate of rewards earned in this market, across all sessions."],
   "col:$/h": ["$/hour", "Your recent reward rate in this market, over roughly the last 10 minutes."],
   "col:Paying": ["Paying", "The share of scored seconds in which your orders earned something. Below 100% means some seconds paid nothing: a side of the book was under Target, your order was too deep in the queue, or you had no order resting."],
   "col:Flags": ["Flags", "Anything unusual about this market right now. Hover a flag for details."],
 
   // flags
+  "flag:PAST": ["PAST", "The bot isn't quoting this market now. It's here because the bot earned (or tried to earn) rewards in it earlier, in this session or a previous one. Earned and snapshot counts are totals across all sessions."],
+  "chip:past": ["Past markets", "Show or hide markets the bot quoted earlier but isn't quoting now."],
+  "bar:session": ["Session", "How many times the bot has been started into this journal. Stopping and restarting the bot continues the same history: rewards, fills and past markets carry over. SINCE is when the first session started."],
   "flag:ok": ["ok", "Nothing unusual: the bot is quoting normally."],
   "flag:BLIND": ["BLIND", "The bot lost its trusted view of this order book (disconnected, or a missed update). It has pulled its orders here until a fresh copy of the book arrives."],
   "flag:PAUSED": ["PAUSED", "Quoting is paused for risk.cooldown_seconds, for one of two reasons. Too many contracts filled here in a short time (risk.fill_burst_contracts), which often means someone better informed is trading against you. Or the price moved sharply (risk.max_mid_move within mid_move_window_seconds), which usually means news."],
@@ -117,7 +120,7 @@ export const HELP: Record<string, HelpEntry> = {
 
 // Why the bot chose a quote's price. Matched by prefix since some include numbers.
 const REASONS: [prefix: string, title: string, body: string][] = [
-  ["thin book", "Thin book (no cushion)", "Fewer than quoting.min_cushion contracts from other traders are resting on this side, so there's nothing ahead of us to absorb a sell-off. The bot doesn't quote here until the book fills in."],
+  ["thin book", "Thin book (no cushion)", "Fewer than quoting.min_cushion contracts (capped at Target Size / 5, the full-credit depth) from other traders are resting on this side, so there's nothing ahead of us to absorb a sell-off. The bot doesn't quote here until the book fills in."],
   ["reward(kept)", "Kept in place", "This order is still earning nearly as much as the best new price would, so the bot left it where it is. Moving an order sends it to the back of the queue."],
   ["reward", "Reward-optimized", "The bot tried each price between the best bid and the deepest price that still gets full credit, and picked the deepest (least likely to be filled) whose reward share is within 10% of the best."],
   ["join(thin)", "Join (thin book)", "The book is too thin to compute the program's reference price, so the bot joined the best bid."],

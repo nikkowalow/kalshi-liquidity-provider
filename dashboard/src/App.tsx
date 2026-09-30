@@ -32,7 +32,7 @@ export default function App() {
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />
         <LogPanel journal={journal} />
         <Selections journal={journal} />
-        <RunConfig journal={journal} />
+        <RunConfig journal={journal} state={state} />
       </div>
       <div className="foot">
         kalshi-lp · reads runs/&lt;run&gt;/state.json + events.jsonl via dashboard/server.py · polls

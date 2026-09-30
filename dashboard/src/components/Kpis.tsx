@@ -61,9 +61,18 @@ export function Kpis({
         label="Session P&L"
         value={<span className={signClass(t?.session_pnl)}>{signedUsd(t?.session_pnl)}</span>}
         raw={num(t?.session_pnl)}
-        sub="mark-to-market, since start"
+        sub="mark-to-market, this session"
       />
-      <Kpi label="Est. rewards" value={usd(t?.rewards_earned, 4)} raw={num(t?.rewards_earned)} sub="this run (bot's estimate)" />
+      <Kpi
+        label="Est. rewards"
+        value={usd(t?.rewards_earned, 4)}
+        raw={num(t?.rewards_earned)}
+        sub={
+          t?.rewards_session != null
+            ? `${usd(t.rewards_session, 4)} this session · all ${state?.session ?? 1} sessions`
+            : "bot's estimate"
+        }
+      />
       <Kpi
         label="Reward rate"
         value={`${usd(rate, 3)}/h`}
@@ -72,7 +81,12 @@ export function Kpis({
       />
       <Kpi label="Exposure" value={usd(t?.exposure)} raw={num(t?.exposure)} sub="position cost" />
       <Kpi label="Resting" value={qty(t?.resting_orders)} raw={num(t?.resting_orders)} sub="bot orders" />
-      <Kpi label="Fills" value={fills} raw={fills} sub={`${rejects} rejected orders`} />
+      <Kpi
+        label="Fills"
+        value={num(t?.fills) ?? fills}
+        raw={num(t?.fills) ?? fills}
+        sub={`all sessions · ${rejects} recent rejects`}
+      />
       <Kpi label="Requotes" value={qty(t?.requotes)} raw={num(t?.requotes)} />
       <Kpi
         label="Feed"

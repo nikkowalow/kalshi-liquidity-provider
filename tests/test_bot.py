@@ -238,6 +238,7 @@ async def test_move_guard_pauses_fast_markets(exchange: FakeExchange) -> None:
 
 
 async def test_cushion_config_flows_through_bot(exchange: FakeExchange) -> None:
-    bot, feed = await started(exchange, quoting={"min_cushion": 200})  # book is only 115 deep
+    # Target 1000 -> cushion may go up to 200; the book is only 115 deep.
+    bot, feed = await started(exchange, quoting={"min_cushion": 200, "default_target_size": 1000})
     await step(bot, feed)
     assert not exchange.orders

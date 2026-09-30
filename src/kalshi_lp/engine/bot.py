@@ -109,10 +109,23 @@ class LiquidityBot:
         self._last_view: RiskView | None = None
         self._mids: dict[str, deque[tuple[float, Decimal]]] = {}
         self.started_at = time.time()
+        # Carry the history of earlier runs in this journal (rewards, markets, counters).
+        prev = self.journal.previous
+        self.tracker.restore(prev.get("ledger") or {})
+        self.titles: dict[str, str] = {}
+        self.fills_total = int(prev.get("fills_total") or 0)
+        self._requotes_before = int(prev.get("requotes_total") or 0)
+        self.first_started_at = float(prev.get("first_started_at") or self.started_at)
+        self.state.listeners.append(self._count_fills)
+        self._config_json = settings.model_dump(mode="json")
         self._group_needs_reset = False
         self._budget_binding = False
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
+
+    def _count_fills(self, kind: str, data: dict[str, Any]) -> None:
+        if kind == "fill":
+            self.fills_total += 1
 
     def stop(self) -> None:
         log.info("stop requested")
@@ -138,6 +151,7 @@ class LiquidityBot:
         self.journal.event(
             "run_start",
             run_id=self.journal.run_id,
+            session=self.journal.session,
             environment=s.environment.value,
             mode="dry-run" if s.dry_run else "live",
             api_url=s.api_url,
@@ -644,10 +658,16 @@ class LiquidityBot:
         rewards_total = self.tracker.total_earned
         rate = self.tracker.total_hourly_rate()
         markets = []
-        tickers = list(self.markets) + sorted(
+        self.titles.update((t, m.title) for t, m in self.markets.items())
+        live = list(self.markets) + sorted(
             {o.ticker for o in self.state.our_orders()} - set(self.markets)
         )
-        for ticker in tickers:
+        # Markets from earlier in this run or earlier runs, most earned first.
+        past = sorted(
+            set(self.tracker.stats) - set(live),
+            key=lambda t: -self.tracker.stats[t].earned,
+        )
+        for ticker in live + past:
             market = self.markets.get(ticker)
             book = self.state.book(ticker)
             pos = self.state.positions.get(ticker)
@@ -657,7 +677,10 @@ class LiquidityBot:
             markets.append(
                 {
                     "ticker": ticker,
-                    "title": market.title if market else "",
+                    "title": market.title
+                    if market
+                    else self.titles.get(ticker) or (stats.title if stats else ""),
+                    "inactive": ticker in past,
                     "close_time": market.close_time if market else None,
                     "reduce_only": ticker in self.reduce_only,
                     "paused": self.risk.market_paused(ticker),
@@ -679,11 +702,14 @@ class LiquidityBot:
                     "avg_score": stats.avg_score if stats else 0,
                     "snapshots": stats.snapshots if stats else 0,
                     "paying_snapshots": stats.scored if stats else 0,
+                    "last_earned_at": stats.last_earned_at if stats else None,
                 }
             )
         s = self.settings
         return {
             "run_id": self.journal.run_id,
+            "session": self.journal.session,
+            "first_started_at": self.first_started_at,
             "status": status or ("halted" if self.risk.halted else "running"),
             "environment": s.environment.value,
             "mode": "dry-run" if s.dry_run else "live",
@@ -700,13 +726,20 @@ class LiquidityBot:
                 "max_capital": s.risk.max_capital,
                 "session_pnl": view.session_pnl if view else 0,
                 "exposure": view.total_exposure if view else 0,
-                "rewards_earned": rewards_total,
+                "rewards_earned": rewards_total,  # all runs in this journal
+                "rewards_session": self.tracker.session_earned,
                 "rewards_per_hour": rate,
                 "requotes": self.requotes,
+                "fills": self.fills_total,
                 "resting_orders": len(self.state.our_orders()),
             },
             "markets": markets,
             "orders": self._orders_with_queue(),
+            "config": self._config_json,
+            # Persisted for the next run (see RunJournal.previous).
+            "ledger": self.tracker.ledger(self.titles),
+            "fills_total": self.fills_total,
+            "requotes_total": self._requotes_before + self.requotes,
         }
 
     def _orders_with_queue(self) -> list[dict[str, Any]]:

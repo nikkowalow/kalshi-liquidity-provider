@@ -1,9 +1,11 @@
+import { useState } from 'react'
 import { num, pct, px, qty, signClass, signedUsd, usd } from '../lib/format'
 import { useFreshKeys } from '../lib/useFreshKeys'
 import type { LegQuote, MarketRow, OrderRow } from '../types'
 import { Flash } from './Flash'
 import { Empty, Panel } from './Panel'
 import { RankBadge } from './SidePanels'
+import { Ticker } from './Ticker'
 
 const COLUMNS: [label: string, align?: 'l'][] = [
   ['Ticker', 'l'],
@@ -45,6 +47,13 @@ function QuoteCell({ q }: { q?: LegQuote }) {
 }
 
 function Flags({ m }: { m: MarketRow }) {
+  if (m.inactive) {
+    return (
+      <span className="tag dim" data-help="flag:PAST">
+        PAST
+      </span>
+    )
+  }
   const flags: [string, string][] = []
   if (!m.healthy) flags.push(['BLIND', 'neg'])
   if (m.paused) flags.push(['PAUSED', 'yl'])
@@ -83,9 +92,9 @@ function Row({ m, orders, fresh }: { m: MarketRow; orders: OrderRow[]; fresh: bo
   const yesRank = sideRank(orders, 'yes')
   const noRank = sideRank(orders, 'no')
   return (
-    <tr className={fresh ? 'row-new' : undefined}>
-      <td className="l am" data-help={`ticker:${m.ticker}|${m.title}`}>
-        {m.ticker}
+    <tr className={[fresh ? 'row-new' : '', m.inactive ? 'row-past' : ''].join(' ').trim() || undefined}>
+      <td className="l am">
+        <Ticker value={m.ticker} help={`ticker:${m.ticker}|${m.title}`} />
       </td>
       <td className="cy">
         <Flash value={b?.bid ?? null}>{px(b?.bid)}</Flash>
@@ -137,18 +146,34 @@ function Row({ m, orders, fresh }: { m: MarketRow; orders: OrderRow[]; fresh: bo
   )
 }
 
-export function MarketsTable({ markets, orders }: { markets: MarketRow[]; orders: OrderRow[] }) {
+export function MarketsTable({ markets: all, orders }: { markets: MarketRow[]; orders: OrderRow[] }) {
+  const [showPast, setShowPast] = useState(true)
+  const active = all.filter((m) => !m.inactive).length
+  const pastCount = all.length - active
+  const markets = showPast ? all : all.filter((m) => !m.inactive)
   const fresh = useFreshKeys(markets.map((m) => m.ticker))
   return (
     <Panel
       title="Markets"
       help="panel:markets"
-      note={markets.length ? `${markets.length} active` : ''}
+      note={all.length ? `${active} active${pastCount ? ` · ${pastCount} past` : ''}` : ''}
       tools={
-        <span className="dim">
-          book = live YES bid/ask · quotes = bot&apos;s desired YES bid / ask · share = est. reward
-          share YES/NO
-        </span>
+        <>
+          <span className="dim">
+            book = live YES bid/ask · quotes = bot&apos;s desired YES bid / ask · share = est. reward
+            share YES/NO{' '}
+          </span>
+          {pastCount > 0 && (
+            <button
+              type="button"
+              className={`chip${showPast ? ' on' : ''}`}
+              data-help="chip:past"
+              onClick={() => setShowPast((v) => !v)}
+            >
+              past markets
+            </button>
+          )}
+        </>
       }
       height="md"
     >

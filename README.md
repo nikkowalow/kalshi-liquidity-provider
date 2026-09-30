@@ -99,9 +99,18 @@ representative of production.
 
 ## Live dashboard
 
-Every `klp run` writes a journal to `runs/<run-id>/`: `events.jsonl` (orders placed, cancelled,
-shrunk, or rejected, fills, quote changes, market selections, and every log line) and
-`state.json` (a full snapshot, rewritten every second). The dashboard reads the journal live:
+`klp run` writes a journal to `runs/<env>-<mode>/` (for example `runs/prod-live/`):
+`events.jsonl` (orders placed, cancelled, shrunk, or rejected, fills, quote changes, market
+selections, and every log line), `metrics.jsonl` (totals every 10 seconds, for the charts) and
+`state.json` (a full snapshot, rewritten every second).
+
+The journal is persistent. Stopping and restarting the bot, for a code or config change, say,
+appends to the same journal as a new *session*: estimated rewards, per-market earnings, fills
+and the markets it was in carry over, so the dashboard shows one continuous history. Use
+`klp run --journal NAME` to start a separate history instead. Journals from older versions (one
+directory per run) are imported the first time and moved to `runs/_imported/`.
+
+The dashboard reads the journal live:
 
 ```bash
 make dashboard          # builds the React app, serves it + the journal API on http://127.0.0.1:8050
@@ -114,8 +123,8 @@ http://localhost:5173 (Vite proxies `/api` to the Python server).
 It shows status and KPIs (balance, capital vs. budget, session P&L, estimated rewards and rate);
 per-market book, quotes, position, program, reward share, and earnings; charts of rewards, P&L,
 and capital over time; a filterable blotter; resting orders and fills; the log; market-selection
-history; and the run's config. *Follow latest* jumps to each new run, and past runs stay
-selectable. The server is standard-library only and listens on localhost only.
+history; and the run's config. *Follow latest* shows the most recently updated journal, and
+the others (prod-live, demo-dry, ...) stay selectable. The server is standard-library only and listens on localhost only.
 
 ## Going to production
 

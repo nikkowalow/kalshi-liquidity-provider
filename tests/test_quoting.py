@@ -155,7 +155,8 @@ def test_sticky_quote_keeps_queue_position(quoting_cfg, reward) -> None:
     assert riskier.quote.price == D("0.35")
 
 
-def test_cushion_keeps_others_ahead_of_us(quoting_cfg, reward) -> None:
+def test_cushion_keeps_others_ahead_of_us(quoting_cfg) -> None:
+    reward = RewardParams(target_size=D(1000), discount_factor=D("0.5"))  # full credit to 200
     cfg = quoting_cfg.model_copy(update={"min_cushion": D(50), "placement": "join"})
     # YES bids: 20 @ 0.40, 40 @ 0.39, 100 @ 0.38 -> 50 contracts ahead first reached at 0.39.
     book = make_book(yes=[("0.40", 20), ("0.39", 40), ("0.38", 100)], no=[("0.55", 200)])
@@ -189,3 +190,14 @@ def test_young_orders_are_not_moved_for_reward_but_are_for_safety(quoting_cfg, r
     assert at("0.39", age=2) == D("0.39")  # young and flat: stays
     assert at("0.39", age=2, position=10) < D("0.39")  # holding inventory: back off now
     assert at("0.46", age=2) != D("0.46")  # above the cap (inside min_edge): unsafe, moves
+
+
+def test_cushion_never_exceeds_full_credit_depth(quoting_cfg) -> None:
+    # Target 300 -> full credit for the first 60 contracts. A 100 cushion would
+    # force a discounted price; it's capped at 60 instead.
+    small = RewardParams(target_size=D(300), discount_factor=D("0.5"), reward_per_day=D(50))
+    cfg = quoting_cfg.model_copy(update={"min_cushion": D(100), "placement": "join"})
+    book = make_book(yes=[("0.40", 30), ("0.39", 40), ("0.38", 400)], no=[("0.55", 400)])
+    d = quote(cfg, small, book)
+    assert d[Leg.YES].quote.price == D("0.39")  # 70 ahead >= 60; not pushed down to 0.38
+    assert d[Leg.YES].score.share > 0

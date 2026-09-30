@@ -64,6 +64,20 @@ export function TopBar({ runs, runId, onChooseRun, follow, onFollow, state, serv
       {state && <span>ENV {state.environment}</span>}
       {!serverUp && <span className="badge halted">● dashboard server unreachable</span>}
       <span className="spacer" />
+      {state?.session != null && (
+        <span data-help="bar:session">
+          SESSION {state.session}
+          {state.first_started_at
+            ? ` · SINCE ${new Date(state.first_started_at * 1000).toLocaleString([], {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+              })}`
+            : ''}
+        </span>
+      )}
       {uptime && <span>UP {uptime}</span>}
       <span>{new Date(now).toLocaleTimeString([], { hour12: false })}</span>
     </div>

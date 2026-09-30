@@ -3,7 +3,9 @@
 import http.client
 import json
 import logging
+import os
 import threading
+import time
 import urllib.request
 from decimal import Decimal
 from http.server import ThreadingHTTPServer
@@ -131,3 +133,158 @@ def test_dashboard_rejects_path_traversal(dashboard) -> None:
     resp = conn.getresponse()
     assert resp.status == 404 and b"[project]" not in resp.read()
     assert b"[project]" not in get(base + "/assets/..%2F..%2F..%2Fpyproject.toml")
+
+
+def test_journal_is_shared_across_runs(tmp_path) -> None:
+    first = RunJournal(tmp_path, "prod", "live")
+    first.event("order", action="place")
+    first.write_state({"status": "ended", "session": 1, "ledger": {"X": {"earned": 0.5}}})
+    first.close()
+    second = RunJournal(tmp_path, "prod", "live")
+    second.event("order", action="cancel")
+    second.close()
+    assert second.dir == first.dir == tmp_path / "prod-live"
+    assert second.session == 2
+    assert second.previous["ledger"] == {"X": {"earned": 0.5}}
+    assert [e["action"] for e in read_events(second)] == ["place", "cancel"]
+    assert RunJournal(tmp_path, "prod", "live", name="fresh").session == 1
+
+
+def test_metrics_also_go_to_their_own_file(tmp_path) -> None:
+    j = RunJournal(tmp_path, "demo", "dry")
+    j.event("metrics", rewards_earned=1)
+    j.event("order", action="place")
+    j.close()
+    lines = (j.dir / "metrics.jsonl").read_text().splitlines()
+    assert [json.loads(line)["type"] for line in lines] == ["metrics"]
+
+
+def _legacy_run(root, name, earned, markets, events, updated=1000.0, status="ended"):
+    path = root / name
+    path.mkdir()
+    (path / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    state = {
+        "status": status,
+        "started_at": updated - 100,
+        "updated_at": updated,
+        "totals": {"rewards_earned": earned, "requotes": 10},
+        "markets": markets,
+    }
+    (path / "state.json").write_text(json.dumps(state))
+    os.utime(path / "state.json", (updated, updated))
+
+
+def test_legacy_runs_are_imported_once(tmp_path) -> None:
+    row = {
+        "ticker": "A",
+        "title": "Alpha",
+        "snapshots": 10,
+        "paying_snapshots": 5,
+        "avg_score": 0.2,
+    }
+    _legacy_run(
+        tmp_path,
+        "20260929-100000-prod-live",
+        0.3,
+        [{**row, "earned": 0.3}],
+        [{"ts": 1, "type": "metrics", "rewards_earned": 0.3}, {"ts": 2, "type": "fill"}],
+    )
+    _legacy_run(
+        tmp_path,
+        "20260929-110000-prod-live",
+        0.2,
+        [{**row, "earned": 0.2}],
+        [{"ts": 3, "type": "metrics", "rewards_earned": 0.2}],
+    )
+    _legacy_run(tmp_path, "20260929-120000-demo-live", 9.0, [], [])  # other env: untouched
+
+    j = RunJournal(tmp_path, "prod", "live")
+    j.close()
+    assert j.session == 3
+    ledger = j.previous["ledger"]["A"]
+    assert ledger["earned"] == pytest.approx(0.5)
+    assert ledger["snapshots"] == 20 and ledger["scored"] == 10
+    assert ledger["score_sum"] == pytest.approx(4.0) and ledger["title"] == "Alpha"
+    assert j.previous["fills_total"] == 1 and j.previous["requotes_total"] == 20
+    metrics = [json.loads(line) for line in (j.dir / "metrics.jsonl").read_text().splitlines()]
+    assert [m["rewards_earned"] for m in metrics] == pytest.approx([0.3, 0.5])  # cumulative
+    assert len(read_events(j)) == 3
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "20260929-120000-demo-live",
+        "_imported",
+        "prod-live",
+    ]
+    assert len(list((tmp_path / "_imported").iterdir())) == 2
+
+
+def test_legacy_run_still_being_written_is_left_alone(tmp_path) -> None:
+    now = time.time()
+    _legacy_run(tmp_path, "20260929-100000-prod-live", 0.3, [], [], now, status="running")
+    _legacy_run(tmp_path, "20260929-090000-prod-live", 0.1, [], [], now)  # just ended: import
+    j = RunJournal(tmp_path, "prod", "live")
+    j.close()
+    assert j.session == 2 and (tmp_path / "20260929-100000-prod-live").exists()
+    assert (tmp_path / "_imported" / "20260929-090000-prod-live").exists()
+
+
+async def test_restarted_bot_carries_rewards_and_fills(tmp_path) -> None:
+    from kalshi_lp.engine.bot import LiquidityBot
+
+    async def run_once() -> dict:
+        book = make_book(yes=[("0.40", 15), ("0.38", 100)], no=[("0.50", 15), ("0.48", 100)])
+        exchange = FakeExchange([make_market(T)], {T: book})
+        exchange.programs = [program()]
+        feed = FakeFeed(exchange)
+        journal = RunJournal(tmp_path, "demo", "live")
+        bot = LiquidityBot(
+            settings(selection={"mode": "incentives"}),
+            exchange,
+            feed=feed,
+            journal=journal,  # type: ignore[arg-type]
+        )
+        await bot.startup()
+        await step(bot, feed)
+        bot.sample_rewards()
+        bot.state.emit("fill", {"ticker": T})
+        snap = bot.snapshot(status="ended")
+        journal.write_state(snap)
+        await bot.shutdown()
+        journal.close()
+        return snap
+
+    first = await run_once()
+    second = await run_once()
+    earned = first["totals"]["rewards_earned"]
+    assert earned > 0
+    assert second["session"] == 2
+    assert second["totals"]["rewards_earned"] == pytest.approx(2 * earned)
+    assert second["totals"]["rewards_session"] == pytest.approx(earned)
+    assert second["totals"]["fills"] == 2
+    assert second["ledger"][T]["snapshots"] == 2
+    assert second["first_started_at"] == first["first_started_at"]
+
+
+def test_dashboard_tail_and_metrics(dashboard) -> None:
+    root, base = dashboard
+    j = RunJournal(root, "demo", "dry")
+    for i in range(50):
+        j.event("metrics", rewards_earned=i)
+    j.close()
+    size = (j.dir / "events.jsonl").stat().st_size
+    tail = get(f"{base}/api/runs/{j.run_id}/events?tail=200")
+    assert tail["offset"] == size
+    assert 0 < len(tail["events"]) < 50
+    assert tail["events"][-1]["rewards_earned"] == 49
+    thinned = get(f"{base}/api/runs/{j.run_id}/metrics?points=10")
+    assert len(thinned) == 10
+    assert thinned[0]["rewards_earned"] == 0 and thinned[-1]["rewards_earned"] == 49
+
+
+def test_dashboard_lists_most_recent_first_and_hides_archive(dashboard) -> None:
+    root, base = dashboard
+    for name, mtime in (("old", 100.0), ("new", 200.0)):
+        (root / name).mkdir()
+        (root / name / "state.json").write_text("{}")
+        os.utime(root / name / "state.json", (mtime, mtime))
+    (root / "_imported").mkdir()
+    assert [r["id"] for r in get(base + "/api/runs")] == ["new", "old"]

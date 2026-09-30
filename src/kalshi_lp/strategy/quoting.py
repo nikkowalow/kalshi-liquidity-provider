@@ -89,13 +89,18 @@ class QuoteEngine:
         """Highest price this leg may bid, or None if the leg must not be quoted.
 
         The cushion rule caps the price at the first level (walking down from
-        the best bid) where others' resting size reaches ``min_cushion``, so
+        the best bid) where others' resting size reaches ``min_cushion``
+        (at most the program's full-credit depth), so
         at least that many contracts sit ahead of us and absorb a sell-off
         first. A book too thin to provide the cushion isn't quoted at all.
         """
         cap = self.cfg.max_price
         if self.cfg.min_cushion > 0:
-            cushion = reference_price(ctx.book.bids(leg), self.cfg.min_cushion)
+            # Never demand more cushion than the program's full-credit depth
+            # (Target Size / 5): past that point the cushion would push us to a
+            # discounted price. With a 300 target, full credit ends at 60 contracts.
+            depth = min(self.cfg.min_cushion, ctx.reward.reference_depth)
+            cushion = reference_price(ctx.book.bids(leg), depth)
             if cushion is None:
                 return None
             cap = min(cap, cushion)

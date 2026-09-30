@@ -92,6 +92,11 @@ pre { margin: 0; padding: 6px; color: var(--muted); font-size: 11px; }
 
 /* hover explanations */
 [data-help] { cursor: help; }
+.ticker, .ticker[data-help] { cursor: copy; }
+tr.row-past td { opacity: 0.55; }
+.ticker:hover { text-decoration: underline; }
+.ticker.copied { color: var(--green); }
+.ticker .copy-note { color: var(--green); font-size: 10px; }
 th[data-help], .k[data-help], .t[data-help], h2 > span[data-help], .help-u { text-decoration: underline dotted #6a4500; text-underline-offset: 2px; }
 #help { position: fixed; z-index: 50; max-width: 360px; background: #0d0900; border: 1px solid var(--amber);
         color: var(--text); padding: 6px 8px; font-size: 11px; line-height: 1.45; display: none;

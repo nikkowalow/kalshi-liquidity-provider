@@ -3,9 +3,10 @@ import type { Journal } from '../lib/useJournal'
 import { hms, px, qty, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
 import { useFreshKeys } from '../lib/useFreshKeys'
-import type { OrderRow } from '../types'
+import type { OrderRow, RunState } from '../types'
 import { Flash } from './Flash'
 import { Chips, Empty, Panel, PanelHeader } from './Panel'
+import { Ticker } from './Ticker'
 
 const TARGET_CLASS: Record<OrderRow['in_target'], string> = {
   in: 'tag pos',
@@ -65,7 +66,9 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
             <tbody>
               {sorted.map((o) => (
                 <tr key={o.order_id} className={freshOrders.has(o.order_id) ? 'row-new' : undefined}>
-                  <td className="l">{o.ticker}</td>
+                  <td className="l">
+                    <Ticker value={o.ticker} />
+                  </td>
                   <td className={`l ${o.side === 'bid' ? 'cy' : 'mg'}`}>{o.side === 'bid' ? 'BID' : 'ASK'}</td>
                   <td>{px(o.price)}</td>
                   <td>
@@ -118,7 +121,9 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
               {fills.map((f) => (
                 <tr key={fillKey(f)} className={freshFills.has(fillKey(f)) ? 'row-fill' : undefined}>
                   <td className="l dim">{hms(f.ts)}</td>
-                  <td className="l">{f.ticker}</td>
+                  <td className="l">
+                    <Ticker value={f.ticker} />
+                  </td>
                   <td className={`l ${f.side === 'bid' ? 'cy' : 'mg'}`}>
                     {(f.side ?? '').toUpperCase()}
                     {f.is_taker && (
@@ -215,7 +220,9 @@ export function Selections({ journal }: { journal: Journal }) {
             <tbody>
               {s.markets.map((m) => (
                 <tr key={m.ticker}>
-                  <td className="l am">{m.ticker}</td>
+                  <td className="l am">
+                    <Ticker value={m.ticker} />
+                  </td>
                   <td className="l dim">{m.title.slice(0, 28)}</td>
                   <td className="yl">{usd(m.reward_per_day)}</td>
                   <td>{qty(m.target_size)}</td>
@@ -233,14 +240,20 @@ export function Selections({ journal }: { journal: Journal }) {
   )
 }
 
-export function RunConfig({ journal }: { journal: Journal }) {
+export function RunConfig({ journal, state }: { journal: Journal; state: RunState | null }) {
   const { start, end } = journal
-  const note = start
-    ? `${start.environment} · ${start.mode} · ${start.api_url}${end ? ` · ENDED ${hms(end.ts)} (${end.reason})` : ''}`
-    : ''
+  const config = state?.config ?? start?.config // older journals only have it in run_start
+  const session = state?.session ?? start?.session
+  const note = [
+    session != null ? `session ${session}` : '',
+    start ? `${start.environment} · ${start.mode} · ${start.api_url}` : '',
+    end ? `ENDED ${hms(end.ts)} (${end.reason})` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
   return (
     <Panel title="Run config" help="panel:config" note={note} height="sm">
-      <pre>{start ? JSON.stringify(start.config, null, 2) : '—'}</pre>
+      <pre>{config ? JSON.stringify(config, null, 2) : '—'}</pre>
     </Panel>
   )
 }

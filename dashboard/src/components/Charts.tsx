@@ -20,6 +20,22 @@ interface ChartSpec {
 }
 
 const HEIGHT = 130
+const MAX_DRAWN = 1500 // points per line; long histories are thinned evenly
+
+function thin(points: Point[]): Point[] {
+  if (points.length <= MAX_DRAWN) return points
+  const step = points.length / (MAX_DRAWN - 1)
+  const out = Array.from({ length: MAX_DRAWN - 1 }, (_, i) => points[Math.floor(i * step)])
+  out.push(points[points.length - 1])
+  return out
+}
+
+/** Time of day, plus the date once the chart spans more than a day. */
+function stamp(t: number, span: number): string {
+  if (span < 86_400) return hms(t)
+  const d = new Date(t * 1000)
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${hms(t).slice(0, 5)}`
+}
 const PAD = { left: 56, right: 8, top: 8, bottom: 16 }
 
 function useWidth<T extends HTMLElement>() {
@@ -101,10 +117,10 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
             </g>
           ))}
           <text x={PAD.left} y={HEIGHT - 3} className="axis">
-            {hms(geo.t0)}
+            {stamp(geo.t0, geo.t1 - geo.t0)}
           </text>
           <text x={width - PAD.right} y={HEIGHT - 3} className="axis" textAnchor="end">
-            {hms(geo.t1)}
+            {stamp(geo.t1, geo.t1 - geo.t0)}
           </text>
           {spec.zeroLine && (
             <line x1={PAD.left} x2={width - PAD.right} y1={geo.y(0)} y2={geo.y(0)} className="zero" />
@@ -140,7 +156,7 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
           className="tip"
           style={{ left: Math.min(geo.x(hover.t) + 12, width - 150), top: Math.max(geo.y(hover.v) - 8, 14) }}
         >
-          {hms(hover.t)} &nbsp;<b>{spec.format(hover.v)}</b>
+          {geo ? stamp(hover.t, geo.t1 - geo.t0) : hms(hover.t)} &nbsp;<b>{spec.format(hover.v)}</b>
         </div>
       )}
     </div>
@@ -149,7 +165,7 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
 
 export function Charts({ journal, state }: { journal: Journal; state: RunState | null }) {
   const specs: ChartSpec[] = [
-    { title: 'Est. rewards earned ($)', help: 'chart:rewards', key: 'rewards_earned', format: (v) => usd(v, 4) },
+    { title: 'Est. rewards earned, all sessions ($)', help: 'chart:rewards', key: 'rewards_earned', format: (v) => usd(v, 4) },
     { title: 'Session P&L ($)', help: 'chart:pnl', key: 'session_pnl', format: (v) => signedUsd(v), zeroLine: true },
     {
       title: 'Capital in use ($)',
@@ -167,11 +183,15 @@ export function Charts({ journal, state }: { journal: Journal; state: RunState |
     }
     const live = num(state?.totals[key])
     if (state && live !== null) pts.push({ t: state.updated_at, v: live })
-    return pts
+    return thin(pts)
   }
   return (
     <section className="panel span-12">
-      <PanelHeader title="Performance" help="panel:performance" note="sampled every 10s · hover for values" />
+      <PanelHeader
+        title="Performance"
+        help="panel:performance"
+        note="sampled every 10s · spans every session of this journal · hover for values"
+      />
       <div className="charts">
         {specs.map((s) => (
           <LineChart key={s.key} spec={s} points={series(s.key)} />

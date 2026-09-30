@@ -9,9 +9,11 @@ export interface Totals {
   max_capital: Num
   session_pnl: Num
   exposure: Num
-  rewards_earned: Num
+  rewards_earned: Num // all runs in this journal
+  rewards_session?: Num // since the bot last started
   rewards_per_hour: Num
   requotes: Num
+  fills?: Num // all runs in this journal
   resting_orders: Num
 }
 
@@ -36,6 +38,8 @@ export interface LegQuote {
 export interface MarketRow {
   ticker: string
   title: string
+  inactive?: boolean // not quoted now; only in the history of earlier markets
+  last_earned_at?: number | null
   close_time: string | null
   reduce_only: boolean
   paused: boolean
@@ -75,6 +79,9 @@ export interface OrderRow {
 
 export interface RunState {
   run_id: string
+  session?: number // restarts of the bot into this journal, 1-based
+  first_started_at?: number
+  config?: unknown
   status: string
   environment: string
   mode: string
@@ -163,6 +170,7 @@ export interface WsEvent extends Base {
 
 export interface RunStartEvent extends Base {
   type: 'run_start'
+  session?: number
   environment: string
   mode: string
   api_url: string
