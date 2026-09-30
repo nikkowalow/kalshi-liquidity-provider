@@ -11,9 +11,11 @@ import type {
   RunInfo,
   RunStartEvent,
   RunState,
+  Sample,
 } from '../types'
 
 const MAX_EVENTS = 5000
+const LIVE_SECONDS = 3600 // per-second totals kept for the short chart windows
 const MAX_METRICS = 20000 // ~2 days at one sample per 10s; older history comes thinned from /metrics
 const HISTORY_POINTS = 2000
 const TAIL_BYTES = 3_000_000 // first load: only the recent end of a long journal
@@ -96,6 +98,15 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
   return j
 }
 
+/** Add a snapshot's totals to the per-second history (skipping repeats, keeping an hour). */
+function appendSample(prev: Sample[], sample: Sample): Sample[] {
+  const last = prev.at(-1)
+  if (last && last.t >= sample.t) return prev
+  const cutoff = sample.t - LIVE_SECONDS
+  const kept = prev.length && prev[0].t < cutoff ? prev.filter((s) => s.t >= cutoff) : prev
+  return [...kept, sample]
+}
+
 async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`${url}: ${res.status}`)
@@ -109,6 +120,8 @@ export function useJournal() {
   const [follow, setFollow] = useState(true)
   const [state, setState] = useState<RunState | null>(null)
   const [journal, setJournal] = useState<Journal>(emptyJournal)
+  // Totals from every snapshot while the page is open: per-second detail for short charts.
+  const [live, setLive] = useState<Sample[]>([])
   const [connected, setConnected] = useState(true)
   const offset = useRef<number | null>(null) // null: not loaded yet, start from the tail
   const activeRun = useRef<string | null>(null)
@@ -119,6 +132,7 @@ export function useJournal() {
     setRunId(id)
     setState(null)
     setJournal(emptyJournal())
+    setLive([])
   }, [])
 
   // Run list, and "follow latest".
@@ -173,6 +187,9 @@ export function useJournal() {
         if (cancelled || activeRun.current !== runId) return
         offset.current = batch.offset
         setState(snapshot)
+        if (snapshot.totals) {
+          setLive((prev) => appendSample(prev, { t: snapshot.updated_at, totals: snapshot.totals }))
+        }
         if (history) setJournal((j) => ({ ...j, metrics: history }))
         if (batch.events.length) setJournal((j) => ingest(j, batch.events))
         setConnected(true)
@@ -198,5 +215,5 @@ export function useJournal() {
     [selectRun],
   )
 
-  return { runs, runId, chooseRun, follow, setFollow, state, journal, connected }
+  return { runs, runId, chooseRun, follow, setFollow, state, journal, connected, live }
 }

@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react'
 import type { Journal } from '../lib/useJournal'
-import { hms, kindClass, px, qty, sideClass, usd } from '../lib/format'
+import { kindClass, px, qty, sideClass, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
 import type { LegQuote } from '../types'
 import { Chips, Empty, Panel } from './Panel'
 import { SortTh } from './SortTh'
+import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
 
 const KINDS = ['place', 'cancel', 'decrease', 'exit', 'reject', 'fill', 'quote'] as const
@@ -157,7 +158,9 @@ export function Blotter({ journal }: { journal: Journal }) {
           <tbody>
             {shown.map((r) => (
               <tr key={r.id} className={fresh.has(r.id) ? (r.kind === 'fill' ? 'row-fill' : 'row-new') : undefined}>
-                <td className="l dim">{hms(r.ts)}</td>
+                <td className="l dim">
+                  <Stamp ts={r.ts} />
+                </td>
                 <td className={`l ${kindClass(r.kind)}`} data-help={`type:${r.kind}`}>
                   {r.kind.toUpperCase()}
                 </td>

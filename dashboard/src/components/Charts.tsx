@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { Journal } from '../lib/useJournal'
+import { span } from '../lib/clock'
 import { hms, num, signedUsd, usd } from '../lib/format'
-import type { RunState, Totals } from '../types'
+import type { Journal } from '../lib/useJournal'
+import type { RunState, Sample, Totals } from '../types'
 import { Flash } from './Flash'
 import { PanelHeader } from './Panel'
 
@@ -19,8 +20,41 @@ interface ChartSpec {
   budget?: number | null
 }
 
+/** Time windows. Short ones scroll: the x-axis is always "the last N minutes, up to now". */
+const WINDOWS = [
+  { id: '5M', seconds: 300, grid: 60 },
+  { id: '15M', seconds: 900, grid: 180 },
+  { id: '1H', seconds: 3600, grid: 600 },
+  { id: '1D', seconds: 86_400, grid: 3 * 3600 },
+  { id: 'ALL', seconds: null, grid: null },
+] as const
+type WindowId = (typeof WINDOWS)[number]['id']
+const WINDOW_KEY = 'klp-chart-window'
+
+function useChartWindow(): [WindowId, (w: WindowId) => void] {
+  const [win, setWin] = useState<WindowId>(() => {
+    try {
+      const saved = localStorage.getItem(WINDOW_KEY)
+      if (WINDOWS.some((w) => w.id === saved)) return saved as WindowId
+    } catch {
+      // storage unavailable: default window
+    }
+    return '5M'
+  })
+  const choose = (w: WindowId) => {
+    setWin(w)
+    try {
+      localStorage.setItem(WINDOW_KEY, w)
+    } catch {
+      // not remembered
+    }
+  }
+  return [win, choose]
+}
+
 const HEIGHT = 130
 const MAX_DRAWN = 1500 // points per line; long histories are thinned evenly
+const PAD = { left: 56, right: 8, top: 8, bottom: 16 }
 
 function thin(points: Point[]): Point[] {
   if (points.length <= MAX_DRAWN) return points
@@ -31,12 +65,11 @@ function thin(points: Point[]): Point[] {
 }
 
 /** Time of day, plus the date once the chart spans more than a day. */
-function stamp(t: number, span: number): string {
-  if (span < 86_400) return hms(t)
+function stamp(t: number, spanSeconds: number): string {
+  if (spanSeconds < 86_400) return hms(t)
   const d = new Date(t * 1000)
   return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${hms(t).slice(0, 5)}`
 }
-const PAD = { left: 56, right: 8, top: 8, bottom: 16 }
 
 function useWidth<T extends HTMLElement>() {
   const ref = useRef<T>(null)
@@ -51,35 +84,64 @@ function useWidth<T extends HTMLElement>() {
   return [ref, width] as const
 }
 
-/** Single-series line chart: 2px line, recessive grid, hover crosshair + tooltip. */
-function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
+/** Single-series line chart: flat 2px line, hover crosshair + tooltip.
+ *  With a ``domain`` the x-axis is fixed to it, so the line scrolls as time passes. */
+function LineChart({
+  spec,
+  points,
+  domain,
+  gridStep,
+}: {
+  spec: ChartSpec
+  points: Point[]
+  domain: [number, number] | null
+  gridStep: number | null
+}) {
   const [ref, width] = useWidth<HTMLDivElement>()
   const [hover, setHover] = useState<Point | null>(null)
   const latest = points.at(-1)
+  const first = points[0]
+  const change = latest && first ? latest.v - first.v : null
 
   const geo = useMemo(() => {
     if (points.length < 2 || width < 50) return null
-    const t0 = points[0].t
-    const t1 = Math.max(points.at(-1)!.t, t0 + 1)
+    const t0 = domain ? domain[0] : points[0].t
+    const t1 = Math.max(domain ? domain[1] : points.at(-1)!.t, t0 + 1)
     let lo = Math.min(...points.map((p) => p.v))
     let hi = Math.max(...points.map((p) => p.v))
-    if (spec.budget) hi = Math.max(hi, spec.budget)
-    if (spec.zeroLine) {
-      lo = Math.min(lo, 0)
-      hi = Math.max(hi, 0)
+    if (domain) {
+      // Short window: zoom to the data so small moves are visible.
+      if (spec.zeroLine) {
+        lo = Math.min(lo, 0)
+        hi = Math.max(hi, 0)
+      }
+      const minSpan = Math.max(Math.abs(hi) * 0.002, 1e-4)
+      if (hi - lo < minSpan) {
+        const mid = (hi + lo) / 2
+        lo = mid - minSpan / 2
+        hi = mid + minSpan / 2
+      }
     } else {
+      if (spec.budget) hi = Math.max(hi, spec.budget)
       lo = Math.min(lo, 0)
+      if (spec.zeroLine) hi = Math.max(hi, 0)
     }
     if (hi === lo) hi = lo + 1
-    const pad = (hi - lo) * 0.08
+    const pad = (hi - lo) * 0.1
     hi += pad
-    if (lo < 0) lo -= pad
-    const x = (t: number) => PAD.left + ((width - PAD.left - PAD.right) * (t - t0)) / (t1 - t0)
+    if (domain || lo < 0) lo -= pad
+    const plotW = width - PAD.left - PAD.right
+    const x = (t: number) => PAD.left + (plotW * (t - t0)) / (t1 - t0)
     const y = (v: number) => PAD.top + (HEIGHT - PAD.top - PAD.bottom) * (1 - (v - lo) / (hi - lo))
-    const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('')
+    const inside = points.filter((p) => p.t >= t0)
+    const line = inside.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('')
     const ticks = [0, 1, 2, 3].map((i) => lo + ((hi - lo) * i) / 3)
-    return { t0, t1, x, y, path, ticks }
-  }, [points, width, spec.budget, spec.zeroLine])
+    const verticals: number[] = []
+    if (gridStep) {
+      for (let t = Math.ceil(t0 / gridStep) * gridStep; t <= t1; t += gridStep) verticals.push(t)
+    }
+    return { t0, t1, lo, hi, x, y, line, ticks, verticals }
+  }, [points, width, domain, gridStep, spec.budget, spec.zeroLine])
 
   const onMove = (ev: React.MouseEvent<SVGSVGElement>) => {
     if (!geo) return
@@ -89,16 +151,24 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
     setHover(best)
   }
 
+  const budgetVisible = geo !== null && spec.budget != null && spec.budget >= geo.lo && spec.budget <= geo.hi
   return (
     <div className="chart" ref={ref}>
       <div className="t" data-help={spec.help}>
         {spec.title}
+        {change !== null && change !== 0 && (
+          <span className={`delta ${change > 0 ? 'pos' : 'neg'}`}>
+            {change > 0 ? '▲' : '▼'} {spec.format(Math.abs(change)).replace(/^[+−-]/, '')}
+          </span>
+        )}
         <b>
           <Flash value={latest?.v ?? null}>{latest ? spec.format(latest.v) : '—'}</Flash>
         </b>
       </div>
       {!geo ? (
-        <div className="chart-empty">waiting for data…</div>
+        <div className="chart-empty">
+          waiting for data<span className="dots" />
+        </div>
       ) : (
         <svg
           width={width}
@@ -116,16 +186,37 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
               </text>
             </g>
           ))}
-          <text x={PAD.left} y={HEIGHT - 3} className="axis">
-            {stamp(geo.t0, geo.t1 - geo.t0)}
-          </text>
-          <text x={width - PAD.right} y={HEIGHT - 3} className="axis" textAnchor="end">
-            {stamp(geo.t1, geo.t1 - geo.t0)}
-          </text>
-          {spec.zeroLine && (
+          {geo.verticals.map((t) => (
+            <g key={t}>
+              <line x1={geo.x(t)} x2={geo.x(t)} y1={PAD.top} y2={HEIGHT - PAD.bottom} className="grid" />
+              <text x={geo.x(t)} y={HEIGHT - 3} className="axis" textAnchor="middle">
+                {hms(t).slice(0, 5)}
+              </text>
+            </g>
+          ))}
+          {domain ? (
+            <>
+              <text x={PAD.left} y={HEIGHT - 3} className="axis">
+                -{span(geo.t1 - geo.t0).replace(' 00s', '').replace(' 00m', '')}
+              </text>
+              <text x={width - PAD.right} y={HEIGHT - 3} className="axis now" textAnchor="end">
+                now
+              </text>
+            </>
+          ) : (
+            <>
+              <text x={PAD.left} y={HEIGHT - 3} className="axis">
+                {stamp(geo.t0, geo.t1 - geo.t0)}
+              </text>
+              <text x={width - PAD.right} y={HEIGHT - 3} className="axis" textAnchor="end">
+                {stamp(geo.t1, geo.t1 - geo.t0)}
+              </text>
+            </>
+          )}
+          {spec.zeroLine && geo.lo <= 0 && geo.hi >= 0 && (
             <line x1={PAD.left} x2={width - PAD.right} y1={geo.y(0)} y2={geo.y(0)} className="zero" />
           )}
-          {spec.budget ? (
+          {budgetVisible && spec.budget != null ? (
             <g>
               <line
                 x1={PAD.left}
@@ -139,9 +230,11 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
               </text>
             </g>
           ) : null}
-          <path d={geo.path} className="series" />
+          <path d={geo.line} className="series" />
           {latest && (
-            <circle cx={geo.x(latest.t)} cy={geo.y(latest.v)} r={3} className="live-dot" />
+            <g transform={`translate(${geo.x(latest.t)},${geo.y(latest.v)})`}>
+              <circle r={3} className="live-dot" />
+            </g>
           )}
           {hover && (
             <g>
@@ -156,14 +249,24 @@ function LineChart({ spec, points }: { spec: ChartSpec; points: Point[] }) {
           className="tip"
           style={{ left: Math.min(geo.x(hover.t) + 12, width - 150), top: Math.max(geo.y(hover.v) - 8, 14) }}
         >
-          {geo ? stamp(hover.t, geo.t1 - geo.t0) : hms(hover.t)} &nbsp;<b>{spec.format(hover.v)}</b>
+          {stamp(hover.t, geo.t1 - geo.t0)} &nbsp;<b>{spec.format(hover.v)}</b>
         </div>
       )}
     </div>
   )
 }
 
-export function Charts({ journal, state }: { journal: Journal; state: RunState | null }) {
+export function Charts({
+  journal,
+  state,
+  live,
+}: {
+  journal: Journal
+  state: RunState | null
+  live: Sample[]
+}) {
+  const [win, setWin] = useChartWindow()
+  const w = WINDOWS.find((x) => x.id === win) ?? WINDOWS[0]
   const specs: ChartSpec[] = [
     { title: 'Est. rewards earned, all sessions ($)', help: 'chart:rewards', key: 'rewards_earned', format: (v) => usd(v, 4) },
     { title: 'Session P&L ($)', help: 'chart:pnl', key: 'session_pnl', format: (v) => signedUsd(v), zeroLine: true },
@@ -175,26 +278,58 @@ export function Charts({ journal, state }: { journal: Journal; state: RunState |
       budget: num(state?.totals.max_capital),
     },
   ]
+  const now = state?.updated_at ?? live.at(-1)?.t ?? 0
+  const from = w.seconds ? now - w.seconds : -Infinity
+  const domain: [number, number] | null = w.seconds ? [now - w.seconds, now] : null
+  // Journal history (every 10s) up to where this page's per-second samples begin.
+  const liveStart = live[0]?.t ?? Infinity
   const series = (key: keyof Totals): Point[] => {
     const pts: Point[] = []
     for (const m of journal.metrics) {
       const v = num(m[key])
-      if (v !== null) pts.push({ t: m.ts, v })
+      if (v !== null && m.ts >= from && m.ts < liveStart) pts.push({ t: m.ts, v })
     }
-    const live = num(state?.totals[key])
-    if (state && live !== null) pts.push({ t: state.updated_at, v: live })
+    for (const s of live) {
+      const v = num(s.totals[key])
+      if (v !== null && s.t >= from) pts.push({ t: s.t, v })
+    }
+    const current = num(state?.totals[key])
+    if (state && current !== null && (pts.at(-1)?.t ?? -Infinity) < state.updated_at) {
+      pts.push({ t: state.updated_at, v: current })
+    }
     return thin(pts)
   }
+  const perSecond = w.seconds !== null && w.seconds <= 3600
   return (
     <section className="panel span-12">
       <PanelHeader
         title="Performance"
         help="panel:performance"
-        note="sampled every 10s · spans every session of this journal · hover for values"
+        note={
+          perSecond ? (
+            <>
+              <span className="rec">● REC</span> last {w.id.toLowerCase()} · 1 sample/s while this page
+              is open · hover for values
+            </>
+          ) : (
+            'journal history, sampled every 10s · spans every session · hover for values'
+          )
+        }
+        tools={WINDOWS.map((x) => (
+          <button
+            key={x.id}
+            type="button"
+            className={`chip${x.id === win ? ' on' : ''}`}
+            data-help="chip:window"
+            onClick={() => setWin(x.id)}
+          >
+            {x.id}
+          </button>
+        ))}
       />
       <div className="charts">
         {specs.map((s) => (
-          <LineChart key={s.key} spec={s} points={series(s.key)} />
+          <LineChart key={s.key} spec={s} points={series(s.key)} domain={domain} gridStep={w.grid} />
         ))}
       </div>
     </section>

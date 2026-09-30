@@ -1,5 +1,6 @@
 import { Blotter } from './components/Blotter'
 import { Charts } from './components/Charts'
+import { EarningsMix } from './components/EarningsMix'
 import { HelpLayer } from './components/HelpLayer'
 import { Kpis } from './components/Kpis'
 import { MarketsTable } from './components/MarketsTable'
@@ -7,7 +8,7 @@ import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/Si
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
 import { useEffect, useMemo } from 'react'
-import { scaleView } from './lib/scale'
+import { scaleSamples, scaleView } from './lib/scale'
 import { useJournal } from './lib/useJournal'
 import { useMultiplier } from './lib/useMultiplier'
 
@@ -23,6 +24,11 @@ export default function App() {
   useEffect(() => {
     document.body.classList.toggle('simulated', multiplier !== 1) // projected numbers turn yellow
   }, [multiplier])
+  // Per-second history of the totals while this page is open (5-minute charts, sparklines).
+  const live = useMemo(
+    () => scaleSamples(raw.live, multiplier, rewardFactor),
+    [raw.live, multiplier, rewardFactor],
+  )
   const rejects = journal.orders.filter((o) => o.action === 'reject').length
 
   return (
@@ -39,11 +45,12 @@ export default function App() {
         onMultiplier={setMultiplier}
         rewardFactor={rewardFactor}
       />
-      <Kpis state={state} fills={journal.fills.length} rejects={rejects} />
+      <Kpis state={state} fills={journal.fills.length} rejects={rejects} live={live} />
       <Tape journal={journal} />
       <div className="grid">
         <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} />
-        <Charts journal={journal} state={state} />
+        <Charts journal={journal} state={state} live={live} />
+        <EarningsMix state={state} />
         <Blotter journal={journal} />
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />
         <LogPanel journal={journal} />

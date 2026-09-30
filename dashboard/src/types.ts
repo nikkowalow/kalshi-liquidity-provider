@@ -112,6 +112,12 @@ export interface RunState {
   orders: OrderRow[]
 }
 
+/** One snapshot's totals, collected once a second while the dashboard is open. */
+export interface Sample {
+  t: number // unix seconds
+  totals: Totals
+}
+
 export interface RunInfo {
   id: string
   updated_at: number

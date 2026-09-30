@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { Journal } from '../lib/useJournal'
-import { hms, kindClass, px, qty, sideClass } from '../lib/format'
+import { kindClass, px, qty, sideClass } from '../lib/format'
+import { Stamp } from './Stamp'
 
 interface TapeItem {
   key: string
@@ -44,7 +45,10 @@ export function Tape({ journal }: { journal: Journal }) {
   const run = (copy: string) =>
     items.map((i) => (
       <span key={`${copy}${i.key}`} className="tape-item">
-        <span className="dim">{hms(i.ts)}</span> <span className={i.cls}>{i.text}</span>
+        <span className="dim">
+          <Stamp ts={i.ts} />
+        </span>{' '}
+        <span className={i.cls}>{i.text}</span>
         {i.trade && (
           <>
             {' '}

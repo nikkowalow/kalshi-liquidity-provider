@@ -150,7 +150,7 @@ th[data-help], .k[data-help], .t[data-help], h2 > span[data-help], .help-u { tex
 #help { position: fixed; z-index: 50; max-width: 360px; background: var(--tint-1); border: 1px solid var(--accent);
         color: var(--text); padding: 6px 8px; font-size: 11px; line-height: 1.45; display: none;
         pointer-events: none; white-space: normal; text-transform: none; font-weight: 400;
-        box-shadow: 0 0 0 1px #000, 4px 4px 0 #000; }
+        }
 #help b { color: var(--accent); display: block; margin-bottom: 2px; text-transform: uppercase; font-size: 10px; letter-spacing: .5px; }
 #help i { color: var(--muted); font-style: normal; display: block; margin-top: 4px; }
 .empty { color: var(--muted); padding: 8px; }
@@ -196,7 +196,61 @@ th[data-help], .k[data-help], .t[data-help], h2 > span[data-help], .help-u { tex
 .tape-item::before { content: "▸ "; color: var(--accent-dim); }
 @keyframes tape { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
+/* ------------------------------------------------------------------ live */
+/* Top bar: spinner plus an LED that blinks on every snapshot received. No glows anywhere. */
+.rx { display: inline-flex; align-items: center; gap: 5px; }
+.spin { display: inline-block; width: 9px; height: 9px; border: 2px solid currentColor;
+        border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.rx .led { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green);
+           vertical-align: middle; }
+.rx .fl { background: none !important; animation: none; }
+.rx .fl .led { animation: led .45s steps(1, end); }
+@keyframes led { from { background: #fff; } }
+
+/* Live timestamps: "12s ago", green while fresh. */
+.stamp .ago { color: var(--accent-dim); margin-left: 3px; }
+.stamp.fresh .ago { color: var(--green); }
+.bar .stamp .ago { color: inherit; opacity: .75; }
+
+/* KPI tiles: last 5 minutes as a sparkline behind the number; the rewards counter spins. */
+.kpi { position: relative; overflow: hidden; }
+.kpi .k, .kpi .v, .kpi .s, .kpi .meter { position: relative; }
+.kpi .spark { position: absolute; left: 0; bottom: 4px; width: 100%; height: 24px; opacity: .5;
+              pointer-events: none; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.spark.up polyline { stroke: var(--green); }
+.spark.down polyline { stroke: var(--red); }
+.ticking { font-variant-numeric: tabular-nums; }
+
+.chart .t .delta { margin-left: 8px; font-size: 10px; text-transform: none; }
+.chart .axis.now { fill: var(--green); }
+.rec { color: var(--red); animation: blink 1.2s steps(2, start) infinite; }
+.dots::after { content: ""; animation: dots 1.2s steps(4) infinite; }
+@keyframes dots { 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+
+/* Markets that are earning right now get a green edge. */
+tr.earning > td:first-child { border-left: 2px solid var(--green); }
+
+/* Log: a blinking cursor while tailing. */
+.cursor { color: var(--accent); animation: blink 1s steps(2, start) infinite; }
+
+/* Earnings mix: flat green bars sized by share of the total $/h. */
+.mix { padding: 5px 8px; display: grid; gap: 4px; }
+.mix-row { display: grid; grid-template-columns: 26px minmax(150px, 300px) 1fr 52px 78px; gap: 8px;
+           align-items: center; }
+.mix-rank { color: var(--muted); }
+.mix-row.leader .mix-rank { color: var(--yellow); }
+.mix-track { position: relative; height: 12px; overflow: hidden; border: 1px solid var(--grid);
+             background: color-mix(in oklab, var(--green) 7%, var(--bg)); }
+.mix-bar { position: absolute; left: 0; top: 0; bottom: 0; overflow: hidden;
+           background: var(--green); transition: width .4s ease-out; }
+.mix-pct { text-align: right; color: #fff; }
+.mix-rate { text-align: right; color: var(--green); }
+
 @media (prefers-reduced-motion: reduce) {
   .fl-up, .fl-down, .fl-chg, .row-new > td, table.row-new td, .row-fill > td, .pulse,
-  .badge.live, .chart .live-dot, .tape-track { animation: none; }
+  .badge.live, .chart .live-dot, .tape-track, .spin, .rx .fl .led, .rec, .dots::after,
+  .cursor { animation: none; }
+  .mix-bar { transition: none; }
 }

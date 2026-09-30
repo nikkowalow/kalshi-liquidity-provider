@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { Journal } from '../lib/useJournal'
-import { hms, px, qty, sideClass, usd } from '../lib/format'
+import { px, qty, sideClass, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
@@ -8,9 +8,11 @@ import type { FillEvent, MarketsEvent, OrderRow, RunState } from '../types'
 import { competitionRoom } from '../lib/competition'
 import { CompetitionTag } from './CompetitionTag'
 import { FillsCell, NetCell } from './FillRiskCells'
+import { span } from '../lib/clock'
 import { Flash } from './Flash'
 import { Chips, Empty, Panel, PanelHeader } from './Panel'
 import { SortTh } from './SortTh'
+import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
 
 const TARGET_CLASS: Record<OrderRow['in_target'], string> = {
@@ -135,7 +137,7 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
                       <span className="yl">DISC</span>
                     )}
                   </td>
-                  <td className="dim">{Math.floor(o.age)}s</td>
+                  <td className="dim">{span(o.age)}</td>
                 </tr>
               ))}
             </tbody>
@@ -173,7 +175,9 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
             <tbody>
               {fills.map((f) => (
                 <tr key={fillKey(f)} className={freshFills.has(fillKey(f)) ? 'row-fill' : undefined}>
-                  <td className="l dim">{hms(f.ts)}</td>
+                  <td className="l dim">
+                    <Stamp ts={f.ts} />
+                  </td>
                   <td className="l">
                     <Ticker value={f.ticker} />
                   </td>
@@ -215,7 +219,11 @@ export function LogPanel({ journal }: { journal: Journal }) {
     <Panel
       title="Log"
       help="panel:log"
-      note={String(lines.length)}
+      note={
+        <>
+          {lines.length} · tailing <span className="cursor">█</span>
+        </>
+      }
       span={7}
       height="md"
       tools={<Chips options={LEVELS} selected={levels} onToggle={(l) => setLevels((s) => toggled(s, l))} helpPrefix="level" />}
@@ -227,7 +235,9 @@ export function LogPanel({ journal }: { journal: Journal }) {
           <tbody>
             {lines.map((l, i) => (
               <tr key={`${key(l)}-${i}`} className={`${l.level}${fresh.has(key(l)) ? ' row-new' : ''}`}>
-                <td className="dim">{hms(l.ts)}</td>
+                <td className="dim">
+                  <Stamp ts={l.ts} />
+                </td>
                 <td>{l.level.slice(0, 4)}</td>
                 <td className="dim">{l.logger.replace('kalshi_lp.', '')}</td>
                 <td>{l.msg}</td>
@@ -272,7 +282,7 @@ export function Selections({ journal }: { journal: Journal }) {
             <thead>
               <tr>
                 <SortTh k="Ticker" sorter={sorter} align="l" colSpan={2} text>
-                  {hms(s.ts)} · {s.markets.length} markets
+                  <Stamp ts={s.ts} /> · {s.markets.length} markets
                   {s.reduce_only.length ? ` · reduce-only: ${s.reduce_only.join(', ')}` : ''}
                 </SortTh>
                 <SortTh k="Prog" sorter={sorter} help="col:Prog $/d">
@@ -318,7 +328,7 @@ export function Selections({ journal }: { journal: Journal }) {
                     <NetCell r={m} />
                   </td>
                   <td className="l dim">
-                    {m.close_time ? new Date(m.close_time).toLocaleString([], { hour12: false }) : '—'}
+                    {m.close_time ? <Stamp ts={Date.parse(m.close_time) / 1000} date /> : '—'}
                   </td>
                 </tr>
               ))}
@@ -334,13 +344,25 @@ export function RunConfig({ journal, state }: { journal: Journal; state: RunStat
   const { start, end } = journal
   const config = state?.config ?? start?.config // older journals only have it in run_start
   const session = state?.session ?? start?.session
-  const note = [
-    session != null ? `session ${session}` : '',
-    start ? `${start.environment} · ${start.mode} · ${start.api_url}` : '',
-    end ? `ENDED ${hms(end.ts)} (${end.reason})` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ')
+  const note = (
+    <>
+      {[session != null ? `session ${session}` : '', start ? `${start.environment} · ${start.mode} · ${start.api_url}` : '']
+        .filter(Boolean)
+        .join(' · ')}
+      {start && (
+        <>
+          {' · started '}
+          <Stamp ts={start.ts} onlyAgo />
+        </>
+      )}
+      {end && (
+        <>
+          {' · ENDED '}
+          <Stamp ts={end.ts} /> ({end.reason})
+        </>
+      )}
+    </>
+  )
   return (
     <Panel title="Run config" help="panel:config" note={note} height="sm">
       <pre>{config ? JSON.stringify(config, null, 2) : '—'}</pre>

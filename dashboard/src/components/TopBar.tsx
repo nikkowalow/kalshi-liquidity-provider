@@ -3,6 +3,7 @@ import { duration } from "../lib/format";
 import type { RunInfo, RunState } from "../types";
 import { MULTIPLIER_PRESETS } from "../lib/useMultiplier";
 import { Flash } from "./Flash";
+import { Stamp } from "./Stamp";
 
 const STALE_AFTER_S = 5;
 
@@ -87,6 +88,15 @@ export function TopBar({
         </Flash>{" "}
         {status}
       </span>
+      {status === "running" && (
+        <span className="rx" data-help="bar:rx">
+          <span className="spin" />
+          <Flash value={state?.updated_at ?? null}>
+            <span className="led" />
+          </Flash>
+          RX
+        </span>
+      )}
       <span className={`badge ${state?.mode ?? ""}`} data-help="bar:mode">
         {state?.mode ?? "—"}
       </span>
@@ -122,17 +132,12 @@ export function TopBar({
       {state?.session != null && (
         <span data-help="bar:session">
           SESSION {state.session}
-          {state.first_started_at
-            ? ` · SINCE ${new Date(
-                state.first_started_at * 1000,
-              ).toLocaleString([], {
-                month: "short",
-                day: "numeric",
-                hour: "2-digit",
-                minute: "2-digit",
-                hour12: false,
-              })}`
-            : ""}
+          {state.first_started_at ? (
+            <>
+              {" · SINCE "}
+              <Stamp ts={state.first_started_at} date />
+            </>
+          ) : null}
         </span>
       )}
       {uptime && <span>UP {uptime}</span>}

@@ -20,7 +20,7 @@
  * Size; competitors react.
  */
 import type { Journal } from './useJournal'
-import type { LegQuote, MarketRow, MetricsEvent, RunState, Totals } from '../types'
+import type { LegQuote, MarketRow, MetricsEvent, RunState, Sample, Totals } from '../types'
 
 type N = number | null | undefined
 
@@ -112,6 +112,12 @@ function scaleTotals<T extends Partial<Totals>>(t: T, n: number, rf: number): T 
     rewards_session: lin(t.rewards_session, rf),
     rewards_per_hour: lin(t.rewards_per_hour, rf),
   }
+}
+
+/** Per-second totals history under the multiplier (rewards by the current overall factor). */
+export function scaleSamples(samples: Sample[], n: number, rf: number): Sample[] {
+  if (n === 1) return samples
+  return samples.map((s) => ({ t: s.t, totals: scaleTotals(s.totals, n, rf) }))
 }
 
 export interface Scaled {

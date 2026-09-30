@@ -154,7 +154,13 @@ function Row({ m, orders, fresh }: { m: MarketRow; orders: OrderRow[]; fresh: bo
   const yesRank = sideRank(orders, 'yes')
   const noRank = sideRank(orders, 'no')
   return (
-    <tr className={[fresh ? 'row-new' : '', m.inactive ? 'row-past' : ''].join(' ').trim() || undefined}>
+    <tr
+      className={
+        [fresh ? 'row-new' : '', m.inactive ? 'row-past' : '', m.rate_per_hour > 0 ? 'earning' : '']
+          .join(' ')
+          .trim() || undefined
+      }
+    >
       <td className="l">
         <Ticker value={m.ticker} help={`ticker:${m.ticker}|${m.title}`} />
       </td>
