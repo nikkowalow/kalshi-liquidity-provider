@@ -261,6 +261,8 @@ tr.earning > td:first-child { border-left: 2px solid var(--green); }
                   background: color-mix(in oklab, var(--green) 7%, var(--bg)); }
 .mini-mix-bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--green);
                 transition: width .4s ease-out; }
+.mini-mix.to-go .mini-mix-track { background: color-mix(in oklab, var(--muted) 10%, var(--bg)); }
+.mini-mix.to-go .mini-mix-bar { background: var(--muted); }
 .mini-mix-pct { color: var(--muted); font-size: 11px; min-width: 26px; text-align: right; }
 
 @media (prefers-reduced-motion: reduce) {

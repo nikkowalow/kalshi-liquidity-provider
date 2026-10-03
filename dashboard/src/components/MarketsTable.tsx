@@ -16,13 +16,13 @@ import { Ticker } from './Ticker'
 
 const COLUMNS: [label: string, align?: 'l'][] = [
   ['Ticker', 'l'],
+  ['To $1', 'l'],
   ['Bid'],
   ['Ask'],
   ['Sprd'],
   ['Sz b/a'],
   ['Our YES bid', 'l'],
   ['Our YES ask (NO bid)', 'l'],
-  ['Pos'],
   ['Cost'],
   ['Realized'],
   ['Prog $/d'],
@@ -64,13 +64,13 @@ function accessors(ordersByTicker: Map<string, OrderRow[]>): Accessors<MarketRow
   }
   return {
     Ticker: (m) => m.ticker,
+    'To $1': (m) => periodView(m, Date.now() / 1000).earned,
     Bid: (m) => m.book?.bid,
     Ask: (m) => m.book?.ask,
     Sprd: (m) => (m.book?.bid != null && m.book.ask != null ? m.book.ask - m.book.bid : null),
     'Sz b/a': (m) => add(m.book?.bid_size, m.book?.ask_size),
     'Our YES bid': (m) => m.quotes.yes?.price,
     'Our YES ask (NO bid)': (m) => m.quotes.no?.price,
-    Pos: (m) => m.position,
     Cost: (m) => m.exposure,
     Realized: (m) => m.realized_pnl,
     'Prog $/d': (m) => m.reward.per_day,
@@ -146,6 +146,24 @@ function MixBar({ share, fill }: { share: number | null; fill: number }) {
   )
 }
 
+/** This period's earnings toward Kalshi's payout minimum: grey until it's reached, then green. */
+function ThresholdBar({ m, minimum }: { m: MarketRow; minimum: number }) {
+  const earned = periodView(m, useNow() / 1000).earned
+  const done = earned >= minimum
+  const fill = minimum > 0 ? Math.min(earned / minimum, 1) : 1
+  return (
+    <span
+      className={`mini-mix${done ? '' : ' to-go'}`}
+      title={`${usd(earned, 2)} of ${usd(minimum)} this period${done ? ': pays out' : ` · ${usd(minimum - earned, 2)} to go`}`}
+    >
+      <span className="mini-mix-track">
+        <span className="mini-mix-bar" style={{ width: `${(fill * 100).toFixed(1)}%` }} />
+      </span>
+      <span className="mini-mix-pct">{(fill * 100).toFixed(0)}%</span>
+    </span>
+  )
+}
+
 function Flags({ m }: { m: MarketRow }) {
   if (m.inactive) {
     return (
@@ -195,16 +213,22 @@ interface RowProps {
   fresh: boolean
   share: number | null // of the total $/h across markets (null: not earning)
   fill: number // bar length: this market's $/h over the top earner's
+  minimum: number // Kalshi's payout minimum per period
   sig: string // everything the row shows; unchanged signature = skip re-rendering it
   onSelect: (ticker: string) => void // stable (a state setter): left out of the memo check
 }
 
 const Row = memo(
   RowView,
-  (a, b) => a.sig === b.sig && a.fresh === b.fresh && a.share === b.share && a.fill === b.fill,
+  (a, b) =>
+    a.sig === b.sig &&
+    a.fresh === b.fresh &&
+    a.share === b.share &&
+    a.fill === b.fill &&
+    a.minimum === b.minimum,
 )
 
-function RowView({ m, orders, fresh, share, fill, onSelect }: RowProps) {
+function RowView({ m, orders, fresh, share, fill, minimum, onSelect }: RowProps) {
   const b = m.book
   const spread = b && b.bid !== null && b.ask !== null ? b.ask - b.bid : null
   const { yes, no } = m.quotes
@@ -225,6 +249,9 @@ function RowView({ m, orders, fresh, share, fill, onSelect }: RowProps) {
     >
       <td className="l">
         <Ticker value={m.ticker} help={`ticker:${m.ticker}|${m.title}`} />
+      </td>
+      <td className="l">
+        <ThresholdBar m={m} minimum={minimum} />
       </td>
       <td className="bid">
         <Flash value={b?.bid ?? null}>{px(b?.bid)}</Flash>
@@ -247,12 +274,6 @@ function RowView({ m, orders, fresh, share, fill, onSelect }: RowProps) {
       </td>
       <td className="l">
         <QuoteCell q={no} cls="ask" />
-      </td>
-      <td className={signClass(m.position)}>
-        <Flash value={m.position}>
-          {m.position > 0 ? '+' : ''}
-          {qty(m.position)}
-        </Flash>
       </td>
       <td>{usd(m.exposure)}</td>
       <td className={signClass(m.realized_pnl)}>{signedUsd(m.realized_pnl)}</td>
@@ -300,10 +321,12 @@ function RowView({ m, orders, fresh, share, fill, onSelect }: RowProps) {
 export function MarketsTable({
   markets: all,
   orders,
+  minimum,
   onSelect,
 }: {
   markets: MarketRow[]
   orders: OrderRow[]
+  minimum: number
   onSelect: (ticker: string) => void
 }) {
   const [showPast, setShowPast] = useState(true)
@@ -374,6 +397,7 @@ export function MarketsTable({
                 fresh={fresh.has(m.ticker)}
                 share={totalRate > 0 && m.rate_per_hour > 0 ? m.rate_per_hour / totalRate : null}
                 fill={topRate > 0 ? Math.max(m.rate_per_hour, 0) / topRate : 0}
+                minimum={minimum}
                 sig={JSON.stringify(m) + JSON.stringify(byTicker.get(m.ticker))}
                 onSelect={onSelect}
               />

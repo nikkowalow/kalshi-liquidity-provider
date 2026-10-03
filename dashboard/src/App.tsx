@@ -75,7 +75,12 @@ export default function App() {
       <Kpis state={state} fills={journal.fills.length} rejects={rejects} />
       <Tape fills={journal.fills} orders={journal.orders} />
       <div className="grid">
-        <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} onSelect={setSelected} />
+        <MarketsTable
+          markets={state?.markets ?? []}
+          orders={state?.orders ?? []}
+          minimum={payoutMinimum}
+          onSelect={setSelected}
+        />
         <Charts journal={journal} state={state} live={live} />
         <Scanner scan={raw.scan} />
         <Blotter orders={journal.orders} fills={journal.fills} quotes={journal.quotes} />

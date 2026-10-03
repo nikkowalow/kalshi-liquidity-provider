@@ -79,6 +79,7 @@ export const HELP: Record<string, HelpEntry> = {
   "col:Our YES ask (NO bid)": ["Our YES ask (NO bid)", "The bot's sell order for YES. On Kalshi, selling YES at 0.60 is the same as bidding for NO at 0.40, so it sits in the NO order book.",
     "This order earns the NO side of the reward."],
   "col:Pos": ["Position", "Contracts you hold. Positive means YES contracts and negative means NO. Each pays $1 if its side wins, and $0 if not."],
+  "col:To $1": ["Progress to $1", "How far this period's earnings in this market are toward Kalshi's payout minimum (selection.payout_minimum). Kalshi pays nothing for a period under it. Grey until it's reached, green once it is. Hover the bar for the dollars."],
   "col:Cost": ["Cost", "What you paid for your current position in this market."],
   "col:Realized": ["Realized P&L", "Profit or loss already locked in from positions you've closed in this market, as reported by Kalshi (not limited to this run)."],
   "col:Prog $/d": ["Program $/day", "How much this market's liquidity program pays out per day, split among everyone providing qualifying orders. It's the whole pie, not your slice."],
