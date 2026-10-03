@@ -96,6 +96,7 @@ def test_only_the_part_of_a_sweep_beyond_the_queue_reaches_us() -> None:
     assert risk.cost_per_day == 15 * per_contract
     assert risk.cost_per_contract == per_contract
     assert risk.sweeps_per_day == 4
+    assert risk.hits_per_day == 2  # two of them reached us: two fill events a day
 
 
 def test_rates_scale_to_a_day() -> None:
@@ -114,3 +115,14 @@ def test_rates_scale_to_a_day() -> None:
         [], quote, window_hours=24, sweep_window_seconds=2, fee_rate=D("0.07"), adverse_move=D(0)
     )
     assert quiet.fills_per_day == 0 and quiet.cost_per_day == 0 and quiet.cost_per_contract == 0
+
+
+def test_counting_on_half_the_queue_lets_smaller_sweeps_reach_us() -> None:
+    quote = {Leg.YES: PlannedQuote(D("0.40"), D(10), ahead=D(100))}
+    trades = [trade(Leg.YES, "60", 0), trade(Leg.YES, "90", 100)]  # both stop short of 100
+    kw = {"window_hours": 24, "sweep_window_seconds": 2, "fee_rate": D(0), "adverse_move": D(0)}
+    full = estimate_fill_risk(trades, quote, **kw)
+    half = estimate_fill_risk(trades, quote, queue_factor=D("0.5"), **kw)
+    assert full.hits_per_day == 0
+    assert half.hits_per_day == 2  # past the 50 we count on: 10 and 40 -> our 10 each time
+    assert half.fills_per_day == 20

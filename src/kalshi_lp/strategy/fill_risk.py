@@ -56,6 +56,7 @@ class FillRisk:
     cost_per_day: Decimal  # dollars those fills would have cost, per day
     sweeps_per_day: Decimal  # all sweeps on either book, per day
     window_hours: Decimal  # how much trade history this is based on
+    hits_per_day: Decimal = ZERO  # sweeps that would have reached our quotes (fill events)
 
     @property
     def cost_per_contract(self) -> Decimal:
@@ -101,18 +102,24 @@ def estimate_fill_risk(
     sweep_window_seconds: float,
     fee_rate: Decimal,
     adverse_move: Decimal,
+    queue_factor: Decimal = ONE,
 ) -> FillRisk:
-    """Replay ``window_hours`` of ``trades`` against ``quotes``: fills and their cost per day."""
+    """Replay ``window_hours`` of ``trades`` against ``quotes``: fills and their cost per day.
+
+    ``queue_factor`` is how much of today's queue in front of us to count on (0.5: half).
+    Before a sweep others often pull their orders, so the full queue overstates the cushion.
+    """
     hours = Decimal(str(max(window_hours, 1 / 60)))  # at least a minute of history
     days = hours / 24
     bursts = sweeps(trades, sweep_window_seconds)
-    fills = cost = ZERO
+    fills = cost = hits = ZERO
     for leg, quote in quotes.items():
-        filled = sum(
-            (min(quote.size, max(s.volume - quote.ahead, ZERO)) for s in bursts if s.leg is leg),
-            ZERO,
-        )
-        per_day = filled / days
+        ahead = quote.ahead * queue_factor
+        reached = [
+            min(quote.size, s.volume - ahead) for s in bursts if s.leg is leg and s.volume > ahead
+        ]
+        per_day = sum(reached, ZERO) / days
         fills += per_day
+        hits += Decimal(len(reached)) / days
         cost += per_day * (taker_fee(quote.price, fee_rate) + adverse_move)
-    return FillRisk(fills, cost, Decimal(len(bursts)) / days, hours)
+    return FillRisk(fills, cost, Decimal(len(bursts)) / days, hours, hits)

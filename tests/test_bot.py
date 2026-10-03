@@ -573,3 +573,29 @@ async def test_positions_in_markets_the_bot_doesnt_trade_are_left_alone(
     await bot.requote({T, "MANUAL-1"})  # e.g. a fill there marked it for a requote
     assert not exchange.exits
     assert exchange.positions["MANUAL-1"].position == 22
+
+
+async def test_live_fill_risk_uses_the_orders_resting_now(exchange: FakeExchange) -> None:
+    from kalshi_lp.core.types import Leg
+    from kalshi_lp.exchange.models import Trade
+
+    bot, feed = await started(exchange)
+    await step(bot, feed)
+    now = datetime.now(UTC)
+    exchange.trades[T] = [  # three sweeps through the YES bids, far bigger than any queue
+        Trade(f"t{i}", T, D("0.40"), D(5000), Leg.YES, now - timedelta(hours=i + 1))
+        for i in range(3)
+    ]
+    await bot.refresh_live_fill_risk()
+    yes_size = sum(o.remaining for o in exchange.orders.values() if o.side is Side.BID)
+    risk = bot._live_risk[T]
+    assert risk.hits_per_day > 0
+    assert risk.fills_per_day == 3 * yes_size * D(24) / D(
+        str(bot.settings.selection.trade_lookback_hours)
+    )
+    row = next(m for m in bot.snapshot()["markets"] if m["ticker"] == T)
+    assert row["live_fill_events_per_day"] == risk.hits_per_day
+    exchange.orders.clear()  # nothing resting: nothing exposed
+    feed.sync()
+    await bot.refresh_live_fill_risk()
+    assert T not in bot._live_risk

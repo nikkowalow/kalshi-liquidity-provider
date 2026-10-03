@@ -86,6 +86,11 @@ export interface MarketRow {
   // From the latest selection (see src/kalshi_lp/strategy/fill_risk.py); null if not checked.
   est_daily_reward?: Num // estimated reward $/day at selection
   est_fills_per_day?: Num // our contracts recent sweeps would have filled, per day
+  est_fill_events_per_day?: Num // sweeps that would have reached our quotes, per day
+  // The same, for the orders resting now (real size and queue spot); null without resting orders.
+  live_fills_per_day?: Num
+  live_fill_events_per_day?: Num
+  live_fill_cost_per_day?: Num
   fill_cost_per_day?: Num // what those fills cost (taker fee to exit + adverse move)
   net_daily_reward?: Num // est_daily_reward - fill_cost_per_day
   earned: number

@@ -57,6 +57,7 @@ from kalshi_lp.exchange.models import Market, Order
 from kalshi_lp.feed.state import MarketState
 from kalshi_lp.feed.stream import StreamingFeed
 from kalshi_lp.journal import JournalLogHandler, NullJournal, RunJournal
+from kalshi_lp.strategy.fill_risk import FillRisk, PlannedQuote, estimate_fill_risk
 from kalshi_lp.strategy.quoting import LegDecision, MarketContext, QuoteEngine
 from kalshi_lp.strategy.rewards import (
     Competition,
@@ -73,6 +74,7 @@ TRANSIENT_ERRORS = (KalshiError, httpx.HTTPError)
 RESIZE_STEP = Decimal("0.2")  # auto sizing: grow a market's size only by 20% or more
 FLATTEN_WARN_SECONDS = 300.0  # "can't flatten" is logged at most this often per market
 SCANNER_FIRST_DELAY = 20.0  # seconds after start-up: the first market scan goes first
+LIVE_FILL_RISK_SECONDS = 60.0  # re-estimate fill risk from the resting orders this often
 PAYOUT_CHECK_SECONDS = 300.0  # reconcile the balance for reward payouts this often
 BOOK_LEVELS = 10  # bid levels per side in each snapshot's book (the market popup's ladder)
 
@@ -171,6 +173,7 @@ class LiquidityBot:
         self._flatten_warned: dict[str, float] = {}  # ticker -> last "can't flatten" warning
         self._entries: dict[str, Entry] = {}  # open positions' average entry (from fills)
         self._unwinding: dict[str, dict[str, Any]] = {}  # passive exits resting now
+        self._live_risk: dict[str, FillRisk] = {}  # fill risk of the orders resting now
         self._selected_at: dict[str, float] = {}  # ticker -> monotonic time it was selected
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
@@ -263,6 +266,7 @@ class LiquidityBot:
                 tasks.append(asyncio.create_task(self._scanner_loop(), name="scanner"))
             if not s.dry_run:
                 tasks.append(asyncio.create_task(self._payout_loop(), name="payouts"))
+                tasks.append(asyncio.create_task(self._live_risk_loop(), name="live-fill-risk"))
             for task in tasks:
                 task.add_done_callback(_report_crash)
             await self._quote_loop(max_requotes)
@@ -1192,6 +1196,66 @@ class LiquidityBot:
                 log.exception("market scanner crashed; retrying next interval")
             await self._sleep(self.settings.scanner.interval_seconds)
 
+    async def _live_risk_loop(self) -> None:
+        """Keep the fill risk of the orders actually resting up to date (for the dashboard)."""
+        while not self.stopping:
+            try:
+                await self.refresh_live_fill_risk()
+            except TRANSIENT_ERRORS as exc:
+                log.warning("live fill risk failed: %s; retrying next interval", exc)
+            except Exception:
+                log.exception("live fill risk crashed; retrying next interval")
+            await self._sleep(LIVE_FILL_RISK_SECONDS)
+
+    async def refresh_live_fill_risk(self) -> None:
+        """Replay recent trades against our resting orders: their real size and queue spot.
+
+        Selection estimates the order it would post fresh, at the back of its queue; this is
+        what's exposed now. Markets holding a position (an exit resting) are skipped: their
+        orders close a position rather than open one.
+        """
+        cfg = self.settings.selection
+        if not cfg.fill_risk:
+            return
+        now = time.time()
+        live: dict[str, FillRisk] = {}
+        for ticker in sorted({o.ticker for o in self.state.our_orders()}):
+            if self.state.position(ticker) != 0:
+                continue
+            quotes = self._resting_quotes(ticker)
+            if not quotes:
+                continue
+            trades, hours = await self.selector.recent_trades(ticker, now)
+            live[ticker] = estimate_fill_risk(
+                trades,
+                quotes,
+                window_hours=hours,
+                sweep_window_seconds=cfg.sweep_window_seconds,
+                fee_rate=cfg.taker_fee_rate,
+                adverse_move=cfg.adverse_move,
+                queue_factor=cfg.fill_risk_queue_factor,
+            )
+        self._live_risk = live
+
+    def _resting_quotes(self, ticker: str) -> dict[Leg, PlannedQuote]:
+        """Our resting orders per leg, as the fill replay sees them: all their contracts, at
+        the front-most order's price and real place in the queue (others ahead of it)."""
+        orders = self.state.our_orders(ticker)
+        book = self.state.book(ticker)
+        if not orders or book is None:
+            return {}
+        others = strip_own(book, own_orders_by_leg(orders, self.state.queue_ahead))
+        quotes: dict[Leg, PlannedQuote] = {}
+        for leg in Leg:
+            on_leg = [o for o in orders if o.leg is leg]
+            if not on_leg:
+                continue
+            front = max(on_leg, key=lambda o: o.leg_price)
+            ahead = queue_report(front, book, others, self.state.queue_ahead, None)["ahead_total"]
+            size = sum((o.remaining for o in on_leg), ZERO)
+            quotes[leg] = PlannedQuote(front.leg_price, size, ahead if ahead is not None else ZERO)
+        return quotes
+
     async def _payout_loop(self) -> None:
         """Find the reward payouts Kalshi actually made (see :mod:`engine.payouts`)."""
         while not self.stopping:
@@ -1366,6 +1430,7 @@ class LiquidityBot:
                         else None
                     ),
                     **(_fill_risk_json(self._selected[ticker]) if ticker in self._selected else {}),
+                    **_live_risk_json(self._live_risk.get(ticker)),
                     "est_daily_reward": self._selected[ticker].est_daily_reward
                     if ticker in self._selected
                     else None,
@@ -1517,8 +1582,18 @@ def _fill_risk_json(c: Candidate) -> dict[str, Any]:
     risk = c.fill_risk
     return {
         "est_fills_per_day": risk.fills_per_day if risk else None,
+        "est_fill_events_per_day": risk.hits_per_day if risk else None,
         "fill_cost_per_day": risk.cost_per_day if risk else None,
         "net_daily_reward": c.net_daily_reward if risk else None,
+    }
+
+
+def _live_risk_json(risk: FillRisk | None) -> dict[str, Any]:
+    """Fill risk of the orders resting now (None: no resting orders, or not checked yet)."""
+    return {
+        "live_fills_per_day": risk.fills_per_day if risk else None,
+        "live_fill_events_per_day": risk.hits_per_day if risk else None,
+        "live_fill_cost_per_day": risk.cost_per_day if risk else None,
     }
 
 

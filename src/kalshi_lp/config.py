@@ -135,6 +135,16 @@ class SelectionConfig(_Section):
         25, ge=1, description="How many of the best-ranked candidates get their trades checked."
     )
     trade_lookback_hours: float = Field(24, gt=0, description="Trade history to replay.")
+    fill_risk_queue_factor: Decimal = Field(
+        Decimal(1),
+        gt=0,
+        le=1,
+        description=(
+            "How much of the queue in front of our quote the fill replay counts on (0.5: half, "
+            "so a sweep half the queue's size already reaches us). Others often pull their "
+            "orders just before a sweep; 1 trusts today's queue completely."
+        ),
+    )
     sweep_window_seconds: float = Field(
         2.0,
         gt=0,

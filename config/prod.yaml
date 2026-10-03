@@ -58,7 +58,9 @@ selection:
   # exit plus the move that caused it. Rank by net $/day = reward - fill cost.
   fill_risk: true
   fill_risk_pool: 40 # candidates checked per scan (one trades query each, cached); held first
-  trade_lookback_hours: 24
+  trade_lookback_hours: 168 # replay a week of trades (a day was too short: a quiet day read as 0 risk)
+  fill_risk_queue_factor: 0.5 # count on only half the queue in front of us: others pull orders
+  # before a sweep, so a sweep half the queue's size is treated as reaching us
   sweep_window_seconds: 2 # prints this close together are one sweep: faster than we can react
   taker_fee_rate: 0.07 # Kalshi taker fee: 0.07 x P x (1 - P) per contract
   adverse_move: 0.07 # measured: median 7-8c lost per filled contract on exit (was 0.02)

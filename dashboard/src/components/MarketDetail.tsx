@@ -350,7 +350,8 @@ export function MarketDetail({
   const daysLeft = periodEnd === null ? null : Math.max(periodEnd - now, 0) / 86400
   const paying = m.snapshots ? m.paying_snapshots / m.snapshots : null
   const periods = m.periods ?? []
-  const { earned: periodEarned, projected } = periodView(m, now)
+  const pv = periodView(m, now)
+  const { earned: periodEarned, projected } = pv
   const flags = [
     m.inactive && 'not quoted now (past market)',
     !m.healthy && 'book not trusted (blind)',
@@ -406,6 +407,34 @@ export function MarketDetail({
               {paying === null ? '—' : `${pct(paying)} of ${qty(m.snapshots)} snapshots`}
             </Field>
             <Field label="Avg score">{m.avg_score.toFixed(4)} / 2</Field>
+          </Card>
+
+          <Card title="Fill risk (rest of this period)">
+            <Field label="Chance of a fill">
+              <span data-help="detail:fillchance" className={pv.fillChance === null ? 'dim' : pv.fillChance >= 0.5 ? 'neg' : pv.fillChance >= 0.15 ? 'yl' : 'pos'}>
+                {pv.fillChance === null ? '—' : pct(pv.fillChance)}
+              </span>
+            </Field>
+            <Field label="Expected fills">
+              {pv.fillEvents === null ? '—' : `${pv.fillEvents.toFixed(2)} · ${qty(Math.round((pv.fillContracts ?? 0) * 10) / 10)} contracts`}
+            </Field>
+            <Field label="Expected fill loss" cls={pv.fillLoss ? 'neg' : 'dim'}>
+              {pv.fillLoss === null ? '—' : usd(pv.fillLoss)}
+            </Field>
+            <Field label="Rewards this period (proj.)">{projected === null ? '—' : usd(projected)}</Field>
+            <Field label="Expected net this period" cls={signClass(pv.net)}>
+              <span data-help="detail:net">{pv.net === null ? '—' : signedUsd(pv.net)}</span>
+            </Field>
+            <Field label="Time left">{pv.daysLeft === null ? '—' : span(pv.daysLeft * 86_400)}</Field>
+            <div className="md-sub">
+              {pv.fillBasis === 'live'
+                ? 'from our resting orders now (real size and queue spot), refreshed each minute'
+                : pv.fillBasis === 'planned'
+                  ? "from the quote the bot planned at selection (no resting orders now)"
+                  : 'no estimate yet'}
+              {' · '}replays recent trades, counting on half the queue in front of us; sudden jumps
+              (news, data releases) still aren&apos;t in it
+            </div>
           </Card>
 
           <Card title="Reward program">

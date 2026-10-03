@@ -378,6 +378,7 @@ class MarketSelector:
                 sweep_window_seconds=cfg.sweep_window_seconds,
                 fee_rate=cfg.taker_fee_rate,
                 adverse_move=cfg.adverse_move,
+                queue_factor=cfg.fill_risk_queue_factor,
             )
             c = replace(c, fill_risk=risk)
             c = replace(c, rank_score=c.value * c.rank_multiplier)
