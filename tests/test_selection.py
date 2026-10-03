@@ -477,3 +477,41 @@ async def test_excluded_series_are_never_picked() -> None:
     ex.programs = [program(tickers[0], 500), program(tickers[1], 100)]
     picked = await selector(ex, mode="incentives", exclude_series=["KXBIGGESTQUAKE"]).select()
     assert [c.ticker for c in picked] == ["KXCALM-1"]
+
+
+# ------------------------------------------------------------------ verdicts
+
+
+async def test_verdicts_say_why_a_held_market_was_dropped() -> None:
+    tickers = ["SAFE-1", "SWEPT-1", "RAIN-A", "RAIN-B", "GONE-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program(t, 100) for t in ["SAFE-1", "SWEPT-1", "RAIN-A"]]
+    ex.programs.append(program("RAIN-B", 50))  # RAIN-A outranks it in the series; GONE-1: none
+    ex.trades["SWEPT-1"] = sweep_trades("SWEPT-1", n=200, volume=5000)
+    sel = selector(ex, mode="incentives", max_markets=5, max_per_series=1)
+    held = {t: D(0) for t in ["SAFE-1", "SWEPT-1", "RAIN-B", "GONE-1"]}
+    picked = await sel.select(held)
+    assert "SAFE-1" in {c.ticker for c in picked}
+    v = sel.verdicts
+    assert v["SAFE-1"]["stage"] == "selected"
+    assert v["SWEPT-1"]["stage"] == "fill_risk"
+    assert "after fill costs" in v["SWEPT-1"]["reason"]
+    swept = v["SWEPT-1"]["figures"]
+    assert swept["fill_cost_per_day"] > swept["est_daily_reward"]
+    assert v["RAIN-B"]["stage"] == "diversify" and v["RAIN-B"]["rival"]["ticker"] == "RAIN-A"
+    assert v["GONE-1"]["stage"] == "program"
+    assert "RAIN-A" not in v  # only markets we were in get a verdict
+
+
+async def test_verdicts_name_the_filter_and_its_numbers() -> None:
+    ex = FakeExchange(
+        [make_market("WIDE-1"), make_market("SOON-1", hours_to_close=0.5)],
+        {"WIDE-1": WIDE, "SOON-1": BOOK},
+    )
+    ex.programs = [program("WIDE-1", 100), program("SOON-1", 100)]
+    sel = selector(ex, mode="incentives", fallback_to_volume=False, min_seconds_to_close=3600)
+    assert await sel.select({"WIDE-1": D(0), "SOON-1": D(0)}) == []
+    assert sel.verdicts["WIDE-1"]["stage"] == "book"
+    assert "max_spread" in sel.verdicts["WIDE-1"]["reason"]
+    assert sel.verdicts["SOON-1"]["stage"] == "eligibility"
+    assert "min_seconds_to_close" in sel.verdicts["SOON-1"]["reason"]

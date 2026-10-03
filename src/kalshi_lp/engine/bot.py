@@ -105,6 +105,7 @@ class _Scan:
     candidates: list[Candidate]  # best first
     kept_paused: list[str]  # paused markets that keep their slot
     refreshed: list[Market]  # deselected markets we still hold a position in
+    verdicts: dict[str, dict[str, Any]]  # incumbent -> why selection kept or dropped it
 
 
 class LiquidityBot:
@@ -544,7 +545,47 @@ class LiquidityBot:
             if p.position != 0 and t in self._traded() and t not in chosen and t not in kept_paused
         ]
         refreshed = await self.client.get_markets(tickers=leftovers) if leftovers else []
-        return _Scan(incumbents, previous, paused, candidates, kept_paused, refreshed)
+        return _Scan(
+            incumbents,
+            previous,
+            paused,
+            candidates,
+            kept_paused,
+            refreshed,
+            dict(self.selector.verdicts),
+        )
+
+    def _journal_deselected(self, scan: _Scan, candidates: Sequence[Candidate]) -> None:
+        """Journal why each market the bot just left was dropped, with the numbers behind it.
+
+        The dashboard shows it when you click a "market no longer selected" cancel.
+        """
+        chosen = {c.ticker for c in candidates}
+        selected = [
+            {"ticker": c.ticker, "held": c.ticker in scan.previous, **c.figures()}
+            for c in candidates
+        ]
+        for ticker in scan.previous:
+            if ticker in chosen or ticker in scan.kept_paused:
+                continue
+            verdict = dict(
+                scan.verdicts.get(ticker)
+                or {"stage": "unknown", "reason": "selection didn't record why"}
+            )
+            if ticker in scan.paused:
+                verdict["stage"] = "paused"
+                verdict["reason"] = (
+                    f"paused ({self.risk.pause_reasons.get(ticker, 'risk limit')}), so it sat "
+                    "out this scan, and better markets filled all the slots"
+                )
+            self.journal.event(
+                "deselect",
+                ticker=ticker,
+                **verdict,
+                position=self.state.position(ticker),
+                reduce_only=ticker in self.reduce_only,
+                selected=selected,
+            )
 
     def _adopt(self, scan: _Scan) -> None:
         """Switch to the markets a scan picked. Quick and synchronous: call under the lock."""
@@ -575,6 +616,7 @@ class LiquidityBot:
             del self._entry_risk[ticker]  # left the market: a later entry starts over
         now = time.monotonic()  # when each market got its slot (for min_hold_seconds)
         self._selected_at = {t: self._selected_at.get(t, now) for t in self.markets}
+        self._journal_deselected(scan, candidates)
 
         changed = [c.ticker for c in candidates] != [
             t for t in scan.previous if t not in scan.paused

@@ -14,6 +14,8 @@ import { num } from './lib/format'
 import { scaleJournal, scaleSamples, scaleState } from './lib/scale'
 import { useJournal } from './lib/useJournal'
 import { OpenMarketContext } from './lib/openMarket'
+import { OpenDeselectContext } from './lib/openDeselect'
+import { DeselectDetail } from './components/DeselectDetail'
 import type { MarketRow } from './types'
 import { useMultiplier } from './lib/useMultiplier'
 
@@ -45,6 +47,10 @@ export default function App() {
   // The market whose popup is open (looked up in each snapshot, so it stays live).
   const [selected, setSelected] = useState<string | null>(null)
   const closeDetail = useCallback(() => setSelected(null), [])
+  // A "market no longer selected" cancel whose why-popup is open.
+  const [deselect, setDeselect] = useState<{ ticker: string; ts: number } | null>(null)
+  const openDeselect = useCallback((ticker: string, ts: number) => setDeselect({ ticker, ts }), [])
+  const closeDeselect = useCallback(() => setDeselect(null), [])
   // Any ticker opens the popup; one the bot never tracked gets a bare row (history still shows).
   const detail = selected ? (state?.markets.find((m) => m.ticker === selected) ?? untracked(selected)) : undefined
   const payoutMinimum =
@@ -56,6 +62,7 @@ export default function App() {
 
   return (
     <OpenMarketContext.Provider value={setSelected}>
+    <OpenDeselectContext.Provider value={openDeselect}>
       <TopBar
         runId={runId}
         link={link}
@@ -107,7 +114,9 @@ export default function App() {
           onClose={closeDetail}
         />
       )}
+      {deselect && <DeselectDetail ticker={deselect.ticker} ts={deselect.ts} onClose={closeDeselect} />}
       <HelpLayer />
+    </OpenDeselectContext.Provider>
     </OpenMarketContext.Provider>
   )
 }

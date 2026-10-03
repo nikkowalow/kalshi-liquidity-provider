@@ -10,6 +10,7 @@ import { Chips, Empty, Panel } from './Panel'
 import { SortTh } from './SortTh'
 import { PadRow } from './PadRow'
 import { Stamp } from './Stamp'
+import { Reason } from './Reason'
 import { Ticker } from './Ticker'
 
 const KINDS = ['place', 'cancel', 'decrease', 'exit', 'reject', 'fill', 'quote'] as const
@@ -114,7 +115,7 @@ const BlotterLine = memo(function BlotterLine({ r, fresh }: { r: BlotterRow; fre
       <td className={sideClass(r.side)}>{r.price === null ? '' : px(r.price)}</td>
       <td className={sideClass(r.side)}>{r.size === null ? '' : qty(r.size)}</td>
       <td className="l reason" title={r.reason}>
-        {r.reason}
+        {r.ticker ? <Reason text={r.reason} ticker={r.ticker} ts={r.ts} /> : r.reason}
       </td>
       <td className="l dim">
         {r.quote ? (

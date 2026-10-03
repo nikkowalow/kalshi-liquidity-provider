@@ -664,3 +664,29 @@ def test_max_reward_per_account_is_parsed_in_dollars() -> None:
         IncentiveProgram.from_api({**raw, "max_reward_per_account": None}).max_reward_per_account
         is None
     )
+
+
+async def test_leaving_a_market_journals_why(tmp_path) -> None:
+    import json
+
+    from kalshi_lp.api import _deselect_record
+    from kalshi_lp.journal import RunJournal
+
+    book = make_book(yes=[("0.40", 15), ("0.38", 100)], no=[("0.50", 15), ("0.48", 100)])
+    ex = FakeExchange([make_market("AAA-1"), make_market("BBB-1")], {"AAA-1": book, "BBB-1": book})
+    ex.programs = [program("AAA-1"), program("BBB-1")]
+    journal = RunJournal(tmp_path, "demo", "live")
+    s = settings(selection={"mode": "incentives", "max_markets": 1})
+    bot = LiquidityBot(s, ex, feed=FakeFeed(ex), journal=journal)  # type: ignore[arg-type]
+    await bot.startup()
+    first = next(iter(bot.markets))
+    bot.risk.pause_market(first, "test pause")
+    await bot.reselect()
+    journal.close()
+    path = tmp_path / "demo-live" / "events.jsonl"
+    [e] = [r for r in map(json.loads, path.read_text().splitlines()) if r["type"] == "deselect"]
+    assert e["ticker"] == first and e["stage"] == "paused" and "test pause" in e["reason"]
+    assert [m["ticker"] for m in e["selected"]] == list(bot.markets)
+    record = _deselect_record(path, first, float("inf"))
+    assert record is not None and record["recorded"] and record["stage"] == "paused"
+    assert _deselect_record(path, first, e["ts"] - 60) is None  # nothing that early

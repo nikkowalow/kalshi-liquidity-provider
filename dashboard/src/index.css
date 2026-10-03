@@ -345,3 +345,10 @@ button.bot-item:not(:disabled):hover { background: var(--hover); }
 .kpi.clickable { cursor: pointer; }
 .kpi.clickable:hover { background: var(--hover); }
 .bh-sum { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+
+/* "market no longer selected": click for why the bot left the market */
+.reason-link { all: unset; cursor: pointer; color: inherit; text-decoration: underline dotted;
+               text-underline-offset: 2px; }
+.reason-link:hover, .reason-link:focus-visible { color: var(--accent); }
+.md.dsl { width: min(1200px, 100%); }
+.dsl-reason { padding: 6px 8px; font-size: 14px; color: var(--text); }

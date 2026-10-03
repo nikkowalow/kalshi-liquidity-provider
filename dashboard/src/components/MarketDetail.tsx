@@ -8,6 +8,7 @@ import type { FillEvent, LegQuote, MarketRow, OrderEvent, OrderRow } from '../ty
 import { CompetitionTag } from './CompetitionTag'
 import { RankBadge } from './SidePanels'
 import { Stamp } from './Stamp'
+import { Reason } from './Reason'
 import { Ticker } from './Ticker'
 
 /** Every order action in a market, from the bot's whole journal (GET /api/history/<ticker>). */
@@ -241,7 +242,7 @@ function OrderHistory({ orders }: { orders: OrderEvent[] }) {
             <td className={sideClass(o.side)}>{px(o.price)}</td>
             <td className={sideClass(o.side)}>{qty(o.size)}</td>
             <td className="l dim md-why" title={o.error ?? o.reason}>
-              {o.error ?? o.reason ?? ''}
+              {o.error ?? <Reason text={o.reason ?? ''} ticker={o.ticker} ts={o.ts} />}
             </td>
           </tr>
         ))}

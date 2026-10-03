@@ -17,7 +17,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
 import httpx
 
@@ -114,6 +114,29 @@ class Candidate:
     def ticker(self) -> str:
         return self.market.ticker
 
+    def figures(self) -> dict[str, Any]:
+        """The numbers selection judged this market on (for explaining a decision)."""
+        risk = self.fill_risk
+        return {
+            "est_daily_reward": self.est_daily_reward,
+            "fill_checked": risk is not None,
+            "fills_per_day": risk.fills_per_day if risk else None,
+            "fill_events_per_day": risk.hits_per_day if risk else None,
+            "fill_cost_per_day": risk.cost_per_day if risk else None,
+            "net_daily_reward": self.net_daily_reward,
+            "unpaid_bonus": self.unpaid_bonus,
+            "rank_multiplier": self.rank_multiplier,
+            "rank_score": self.rank_score,
+            "earned": self.earned,
+            "earning_days_left": self.earning_days_left,
+            "est_period_payout": self.est_period_payout,
+            "size": self.size,
+            "capital_needed": self.capital_needed,
+            "reward_per_day": self.reward.reward_per_day,
+            "target_size": self.reward.target_size,
+            "competition": self.competition.level if self.competition else None,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class Catalog:
@@ -151,6 +174,20 @@ class MarketSelector:
         self._incumbents: dict[str, Decimal] = {}
         self._exclude: set[str] = set()
         self._trades: dict[str, _TradeHistory] = {}
+        # Why each incumbent (a market we're in) fared as it did in the last select(): a
+        # stage, a reason and the numbers behind it. The bot journals the ones it leaves.
+        self.verdicts: dict[str, dict[str, Any]] = {}
+
+    def _verdict(
+        self, ticker: str, stage: str, reason: str, c: Candidate | None = None, **extra: Any
+    ) -> None:
+        if ticker in self._incumbents:
+            self.verdicts[ticker] = {
+                "stage": stage,
+                "reason": reason,
+                **({"figures": c.figures()} if c is not None else {}),
+                **extra,
+            }
 
     # ------------------------------------------------------------- rewards
 
@@ -189,24 +226,44 @@ class MarketSelector:
     # ----------------------------------------------------------- filtering
 
     def is_eligible(self, market: Market) -> bool:
-        if not market.is_tradable or market.market_type != "binary":
-            return False
-        if market.ticker in self.cfg.exclude_tickers or market.ticker in self._exclude:
-            return False
+        return self.ineligible_because(market) is None
+
+    def ineligible_because(self, market: Market) -> str | None:
+        """Why ``market`` can't be quoted at all, or None if it can."""
+        if not market.is_tradable:
+            return f"not open for trading (status {market.status})"
+        if market.market_type != "binary":
+            return f"not a binary market ({market.market_type})"
+        if market.ticker in self.cfg.exclude_tickers:
+            return "listed in selection.exclude_tickers"
+        if market.ticker in self._exclude:
+            return "paused: sat out this scan"
         if series_of(market.ticker) in self.cfg.exclude_series:
-            return False
+            return f"its series {series_of(market.ticker)} is in selection.exclude_series"
         to_close = market.seconds_to_close()
-        return to_close is None or to_close >= self.cfg.min_seconds_to_close
+        if to_close is not None and to_close < self.cfg.min_seconds_to_close:
+            return (
+                f"closes in {to_close / 3600:.1f}h, under selection.min_seconds_to_close "
+                f"({self.cfg.min_seconds_to_close / 3600:g}h)"
+            )
+        return None
 
     def book_is_quotable(self, book: Orderbook) -> bool:
-        """Two-sided, tight enough to trust the mid, and away from the tails."""
+        return self.unquotable_because(book) is None
+
+    def unquotable_because(self, book: Orderbook) -> str | None:
+        """Why ``book`` can't be quoted (one-sided, too wide, or in the tails), or None."""
         bid, ask, mid = book.best_yes_bid, book.best_yes_ask, book.mid
         if bid is None or ask is None or mid is None:
-            return False
-        return (
-            ask - bid <= self.cfg.max_spread
-            and self.cfg.min_mid_price <= mid <= self.cfg.max_mid_price
-        )
+            return "the book is one-sided (no bid or no ask)"
+        if ask - bid > self.cfg.max_spread:
+            return f"spread {ask - bid:.2f} is over selection.max_spread {self.cfg.max_spread}"
+        if not self.cfg.min_mid_price <= mid <= self.cfg.max_mid_price:
+            return (
+                f"mid {mid:.3f} is outside {self.cfg.min_mid_price}-{self.cfg.max_mid_price} "
+                "(selection.min_mid_price / max_mid_price)"
+            )
+        return None
 
     @property
     def auto_sizing(self) -> bool:
@@ -265,8 +322,17 @@ class MarketSelector:
         capital, as long as they still pass the filters."""
         self._incumbents = dict(incumbents or {})
         self._exclude = set(exclude)
+        self.verdicts = {}
         catalog = await self.catalog()
         rewards = catalog.rewards
+        for ticker in self._incumbents:
+            if ticker not in rewards:
+                self._verdict(
+                    ticker,
+                    "program",
+                    "no active liquidity program pays this market now "
+                    "(it ended, was paid out, or was withdrawn)",
+                )
 
         if self.cfg.mode == "tickers":
             return await self._rank(
@@ -283,7 +349,10 @@ class MarketSelector:
                 worth_it = await self._apply_fill_risk(worth_it)
                 worth_it.sort(key=lambda c: c.ticker not in held)
             if worth_it or not self.cfg.fallback_to_volume:
-                return self._fit_capital(self._diversify(worth_it, self.cfg.max_markets))
+                diversified = self._diversify(worth_it, self.cfg.max_markets)
+                chosen = self._fit_capital(diversified)
+                self._explain_cut(worth_it, diversified, chosen, held)
+                return chosen
             log.warning("no incentive market passed filters; falling back to volume ranking")
         elif self.cfg.mode == "incentives":
             if not self.cfg.fallback_to_volume:
@@ -304,7 +373,13 @@ class MarketSelector:
         """Rank quotable markets. ``limit=-1`` means max_markets; None means no limit."""
         if limit == -1:
             limit = self.cfg.max_markets
-        eligible = [m for m in markets if self.is_eligible(m)]
+        eligible = []
+        for m in markets:
+            why = self.ineligible_because(m)
+            if why is None:
+                eligible.append(m)
+            else:
+                self._verdict(m.ticker, "eligibility", why)
         if not by_reward:
             # Pre-filter on the market summaries before spending order book reads.
             eligible = [
@@ -317,8 +392,11 @@ class MarketSelector:
         candidates = []
         for market in eligible:
             book = books.get(market.ticker)
-            if book is None or not self.book_is_quotable(book):
+            why = "no order book came back" if book is None else self.unquotable_because(book)
+            if why is not None:
+                self._verdict(market.ticker, "book", why)
                 continue
+            assert book is not None
             reward = rewards.get(market.ticker, self.default_reward())
             est, quotes = self.plan(market, book, reward)
             earned = self._incumbents.get(market.ticker)
@@ -359,9 +437,18 @@ class MarketSelector:
         too_busy: list[Candidate] = []
         too_costly: list[Candidate] = []
         checked = 0
-        for c in ranked:
+        for i, c in enumerate(ranked):
             enough = len(self._diversify(kept, cfg.max_markets)) >= cfg.max_markets
             if checked >= 2 * cfg.fill_risk_pool or (checked >= cfg.fill_risk_pool and enough):
+                for rest in ranked[i:]:
+                    self._verdict(
+                        rest.ticker,
+                        "fill_risk",
+                        f"ranked below the {checked} markets checked for fill risk "
+                        f"(selection.fill_risk_pool {cfg.fill_risk_pool}), so it was never "
+                        "checked; enough better markets passed",
+                        rest,
+                    )
                 break
             checked += 1
             try:
@@ -370,6 +457,9 @@ class MarketSelector:
                 if cfg.max_fills_per_day is not None:
                     log.warning("no trade history for %s (%s); skipping it", c.ticker, exc)
                     too_busy.append(c)
+                    self._verdict(
+                        c.ticker, "fill_risk", f"couldn't read its trade history ({exc})", c
+                    )
                     continue
                 log.warning(
                     "no trade history for %s (%s); ranking it without fill risk", c.ticker, exc
@@ -389,13 +479,37 @@ class MarketSelector:
             c = replace(c, rank_score=c.value * c.rank_multiplier)
             if cfg.max_fills_per_day is not None and risk.fills_per_day > cfg.max_fills_per_day:
                 too_busy.append(c)
+                self._verdict(
+                    c.ticker,
+                    "fill_risk",
+                    f"expected {risk.fills_per_day:.1f} contracts filled/day, over "
+                    f"selection.max_fills_per_day {cfg.max_fills_per_day}",
+                    c,
+                )
             elif (
                 cfg.max_fill_cost_share is not None
                 and c.fill_cost_per_day > c.est_daily_reward * cfg.max_fill_cost_share
             ):
                 too_costly.append(c)
+                share = c.fill_cost_per_day / c.est_daily_reward if c.est_daily_reward else None
+                of_reward = f", {share:.0%} of its ${c.est_daily_reward:.2f}/day reward"
+                self._verdict(
+                    c.ticker,
+                    "fill_risk",
+                    f"fills would cost ${c.fill_cost_per_day:.2f}/day"
+                    + (of_reward if share else "")
+                    + f": over selection.max_fill_cost_share ({cfg.max_fill_cost_share:%})",
+                    c,
+                )
             elif c.net_daily_reward <= cfg.min_net_daily_reward:
                 dropped.append(c)
+                self._verdict(
+                    c.ticker,
+                    "fill_risk",
+                    f"net ${c.net_daily_reward:.2f}/day after fill costs, not over "
+                    f"selection.min_net_daily_reward ${cfg.min_net_daily_reward}",
+                    c,
+                )
             else:
                 kept.append(c)
         kept.sort(key=lambda c: c.rank_score, reverse=True)
@@ -493,6 +607,60 @@ class MarketSelector:
             )
         return chosen
 
+    def _explain_cut(
+        self,
+        passed: Sequence[Candidate],
+        diversified: Sequence[Candidate],
+        chosen: Sequence[Candidate],
+        held: set[str],
+    ) -> None:
+        """Verdicts for markets that passed every filter but still didn't make the cut."""
+        in_div = {c.ticker for c in diversified}
+        in_chosen = {c.ticker for c in chosen}
+        for c in passed:
+            if c.ticker in in_chosen:
+                self._verdict(c.ticker, "selected", "selected", c)
+                continue
+            if c.ticker not in in_div:
+                rival = next(
+                    (d for d in diversified if series_of(d.ticker) == series_of(c.ticker)), None
+                )
+                if rival is not None:
+                    self._verdict(
+                        c.ticker,
+                        "diversify",
+                        f"{rival.ticker} in the same series ({series_of(c.ticker)}) ranked "
+                        f"higher, and selection.max_per_series is {self.cfg.max_per_series}",
+                        c,
+                        rival={"ticker": rival.ticker, **rival.figures()},
+                    )
+                    continue
+                cutoff = diversified[-1] if diversified else None
+                self._verdict(
+                    c.ticker,
+                    "outranked",
+                    f"all {self.cfg.max_markets} slots (selection.max_markets) went to markets "
+                    "ranked higher"
+                    + (" or still within their min hold" if held - {c.ticker} else "")
+                    + (
+                        f"; the last one picked ranks ${cutoff.rank_score:.2f}/day vs this "
+                        f"one's ${c.rank_score:.2f}/day"
+                        if cutoff is not None
+                        else ""
+                    ),
+                    c,
+                )
+                continue
+            used = sum((d.capital_needed for d in chosen), ZERO)
+            budget = (self.max_capital or ZERO) * self.quoting.capital_utilization
+            self._verdict(
+                c.ticker,
+                "capital",
+                f"out of capital: better-ranked markets use ${used:.2f} of the ${budget:.2f} "
+                f"budget, and this one needs ${c.capital_needed:.2f}",
+                c,
+            )
+
     async def catalog(self) -> Catalog:
         """Programs and (in incentives mode) their markets, refreshed every
         catalog_refresh_seconds; order books are fetched fresh by every scan."""
@@ -558,6 +726,18 @@ class MarketSelector:
             else:
                 kept.append(c)
                 continue
+            if c.est_daily_reward > 0:  # spell out the numbers for this one market
+                reason_here = (
+                    f"under ${self.cfg.min_daily_reward}/day (est ${c.est_daily_reward:.2f}/day, "
+                    "selection.min_daily_reward)"
+                    if c.est_daily_reward < self.cfg.min_daily_reward
+                    else f"projected ${c.est_period_payout:.2f} this period (${c.earned:.2f} "
+                    f"earned + ${c.est_daily_reward:.2f}/day x {c.earning_days_left:.2f} days "
+                    f"left), under the ${self._payout_bar(c)} it needs"
+                )
+            else:
+                reason_here = reason
+            self._verdict(c.ticker, "payout", reason_here, c)
             reasons[reason] = reasons.get(reason, 0) + 1
             if c.est_daily_reward > 0:
                 misses.append(c)

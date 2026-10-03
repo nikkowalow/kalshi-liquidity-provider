@@ -329,6 +329,7 @@ class DashboardApi:
         app.router.add_get("/api/bots", self._bots)
         app.router.add_get("/api/balance", self._balance)
         app.router.add_get("/api/history/{ticker}", self._history)
+        app.router.add_get("/api/deselect/{ticker}", self._deselect)
         app.router.add_get("/api/ws", self._ws)
         app.router.add_post("/api/control/{action}", self._control)
         app.router.add_get("/api/{rest:.*}", self._not_found)
@@ -467,6 +468,17 @@ class DashboardApi:
         ticker = request.match_info["ticker"]
         lines = await asyncio.to_thread(_market_orders, self.journal.dir / "events.jsonl", ticker)
         return web.Response(text="[" + ",".join(lines) + "]", content_type="application/json")
+
+    async def _deselect(self, request: web.Request) -> web.Response:
+        """Why the bot left a market: ``?before=<unix ts>`` picks the time (default: now)."""
+        ticker = request.match_info["ticker"]
+        try:
+            before = float(request.query.get("before", "inf"))
+        except ValueError:
+            return _refuse(400, "before must be a unix timestamp")
+        path = self.journal.dir / "events.jsonl"
+        record = await asyncio.to_thread(_deselect_record, path, ticker, before + 5)
+        return web.json_response(record)
 
     async def _config(self, _: web.Request) -> web.Response:
         if self.controls is None:
@@ -712,6 +724,46 @@ def _market_orders(path: Path, ticker: str) -> list[str]:
             ]
     except FileNotFoundError:
         return []
+
+
+def _deselect_record(path: Path, ticker: str, before: float) -> dict[str, Any] | None:
+    """Why the bot left ``ticker`` (the last time at or before ``before``).
+
+    The ``deselect`` event when there is one. Markets left before those existed get what
+    the selections show instead: its figures when it was last picked, and the selection
+    that replaced it (``recorded: False``).
+    """
+    deselect, markets = b'"type": "deselect"', b'"type": "markets"'
+    needle = json.dumps({"ticker": ticker})[1:-1].encode()
+    found: dict[str, Any] | None = None
+    last: dict[str, Any] | None = None  # the latest selection that had it
+    replaced: dict[str, Any] | None = None  # the selection right after that one
+    try:
+        with path.open("rb") as f:
+            for line in f:
+                head = line[:80]
+                if deselect in head and needle in line:
+                    e = json.loads(line)
+                    if e.get("ts", 0) <= before and e.get("ticker") == ticker:
+                        found = e
+                elif markets in head:
+                    e = json.loads(line)
+                    if e.get("ts", 0) > before:
+                        continue
+                    entry = next(
+                        (m for m in e.get("markets") or [] if m.get("ticker") == ticker), None
+                    )
+                    if entry is not None:
+                        last, replaced = {"ts": e["ts"], **entry}, None
+                    elif last is not None and replaced is None:
+                        replaced = e
+    except (FileNotFoundError, ValueError):
+        pass
+    if found is not None:
+        return {"recorded": True, **found}
+    if last is None:
+        return None
+    return {"recorded": False, "ticker": ticker, "last": last, "replaced_by": replaced}
 
 
 def _metric_lines(path: Path, points: int) -> list[str]:
