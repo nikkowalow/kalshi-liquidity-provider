@@ -1,9 +1,10 @@
 import { memo, useMemo, useRef, useState } from 'react'
 import type { Journal } from '../lib/useJournal'
-import { px, qty, sideClass, usd } from '../lib/format'
+import { px, qty, sideClass, signClass, signedUsd, usd } from '../lib/format'
 import { toggled } from '../lib/sets'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
+import { type RoundTrip, roundTrips } from '../lib/roundTrips'
 import { useVirtualRows } from '../lib/useVirtualRows'
 import type { FillEvent, LogEvent, MarketsEvent, OrderRow } from '../types'
 import { competitionRoom } from '../lib/competition'
@@ -150,7 +151,44 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
 const fillKey = (f: FillEvent) => `${f.ts}-${f.order_id}-${f.count}`
 
 /** Fills only change when one arrives: memoized, and only visible rows are drawn. */
-const FillsBlock = memo(function FillsBlock({ fills: all }: { fills: FillEvent[] }) {
+const FillsBlock = memo(function FillsBlock({ fills }: { fills: FillEvent[] }) {
+  const [tab, setTab] = useState<'recent' | 'history'>('recent')
+  const trips = useMemo(() => roundTrips(fills), [fills])
+  const closed = trips.filter((t) => t.pnl !== null)
+  const total = closed.reduce((sum, t) => sum + (t.pnl ?? 0), 0)
+  const tools = (
+    <>
+      <button type="button" className={`chip${tab === 'recent' ? ' on' : ''}`} onClick={() => setTab('recent')}>
+        fills
+      </button>
+      <button
+        type="button"
+        className={`chip${tab === 'history' ? ' on' : ''}`}
+        data-help="panel:trades"
+        onClick={() => setTab('history')}
+      >
+        history
+      </button>
+    </>
+  )
+  const note =
+    tab === 'recent' ? (
+      String(fills.length)
+    ) : (
+      <>
+        {trips.length} trades · {closed.length} closed ·{' '}
+        <span className={signClass(total)}>{signedUsd(total)}</span>
+      </>
+    )
+  return (
+    <>
+      <PanelHeader title="Fills" help="panel:fills" note={note} tools={tools} />
+      {tab === 'recent' ? <RecentFills fills={fills} /> : <TradeHistory trips={trips} />}
+    </>
+  )
+})
+
+function RecentFills({ fills: all }: { fills: FillEvent[] }) {
   const fillSort = useSort('fills')
   const fills = useMemo(
     () => sortRows([...all].reverse(), FILL_ACCESSORS, fillSort.state),
@@ -161,48 +199,135 @@ const FillsBlock = memo(function FillsBlock({ fills: all }: { fills: FillEvent[]
   const body = useRef<HTMLDivElement>(null)
   const win = useVirtualRows(body, fills.length)
   return (
-    <>
-      <PanelHeader title="Fills" help="panel:fills" note={String(all.length)} />
-      <div className="body h-sm" ref={body}>
-        {fills.length === 0 ? (
-          <Empty>no fills yet</Empty>
-        ) : (
-          <table className="vt">
-            <thead>
-              <tr>
-                <SortTh k="Time" sorter={fillSort} align="l">
-                  Time
-                </SortTh>
-                <SortTh k="Ticker" sorter={fillSort} align="l" text>
-                  Ticker
-                </SortTh>
-                <SortTh k="Side" sorter={fillSort} align="l" help="fill:Side" text>
-                  Side
-                </SortTh>
-                <SortTh k="Price" sorter={fillSort} help="fill:Price">
-                  Price
-                </SortTh>
-                <SortTh k="Qty" sorter={fillSort} help="fill:Qty">
-                  Qty
-                </SortTh>
-                <SortTh k="Pos" sorter={fillSort} help="fill:Pos after">
-                  Pos after
-                </SortTh>
-              </tr>
-            </thead>
-            <tbody>
-              <PadRow height={win.padTop} cols={6} />
-              {fills.slice(win.start, win.end).map((f) => (
-                <FillLine key={fillKey(f)} f={f} fresh={freshFills.has(fillKey(f))} />
-              ))}
-              <PadRow height={win.padBottom} cols={6} />
-            </tbody>
-          </table>
-        )}
-      </div>
-    </>
+    <div className="body h-sm" ref={body}>
+      {fills.length === 0 ? (
+        <Empty>no fills yet</Empty>
+      ) : (
+        <table className="vt">
+          <thead>
+            <tr>
+              <SortTh k="Time" sorter={fillSort} align="l">
+                Time
+              </SortTh>
+              <SortTh k="Ticker" sorter={fillSort} align="l" text>
+                Ticker
+              </SortTh>
+              <SortTh k="Side" sorter={fillSort} align="l" help="fill:Side" text>
+                Side
+              </SortTh>
+              <SortTh k="Price" sorter={fillSort} help="fill:Price">
+                Price
+              </SortTh>
+              <SortTh k="Qty" sorter={fillSort} help="fill:Qty">
+                Qty
+              </SortTh>
+              <SortTh k="Pos" sorter={fillSort} help="fill:Pos after">
+                Pos after
+              </SortTh>
+            </tr>
+          </thead>
+          <tbody>
+            <PadRow height={win.padTop} cols={6} />
+            {fills.slice(win.start, win.end).map((f) => (
+              <FillLine key={fillKey(f)} f={f} fresh={freshFills.has(fillKey(f))} />
+            ))}
+            <PadRow height={win.padBottom} cols={6} />
+          </tbody>
+        </table>
+      )}
+    </div>
   )
-})
+}
+
+const TRIP_ACCESSORS: Accessors<RoundTrip> = {
+  Opened: (t) => t.opened,
+  Closed: (t) => t.closed,
+  Ticker: (t) => t.ticker,
+  Held: (t) => t.held,
+  Qty: (t) => t.size,
+  Entry: (t) => t.entry,
+  Exit: (t) => t.exit,
+  Held_for: (t) => (t.closed === null ? null : t.closed - t.opened),
+  Fees: (t) => t.fees,
+  PnL: (t) => t.pnl,
+  Per: (t) => (t.pnl === null || !t.size ? null : t.pnl / t.size),
+  How: (t) => t.exitHow,
+}
+
+const EXIT_CLASS = { passive: 'pos', crossed: 'neg', mixed: 'yl' } as const
+
+/** One row per position: what we paid, what we got, and what it made or lost. */
+function TradeHistory({ trips: all }: { trips: RoundTrip[] }) {
+  const sorter = useSort('trades')
+  const trips = useMemo(() => sortRows(all, TRIP_ACCESSORS, sorter.state), [all, sorter.state])
+  if (!trips.length) {
+    return (
+      <div className="body h-sm">
+        <Empty>no trades yet</Empty>
+      </div>
+    )
+  }
+  const th = (k: string, label: string, align?: 'l', text?: boolean) => (
+    <SortTh k={k} sorter={sorter} align={align} text={text} help={`trade:${k}`}>
+      {label}
+    </SortTh>
+  )
+  return (
+    <div className="body h-sm">
+      <table>
+        <thead>
+          <tr>
+            {th('Opened', 'Opened', 'l')}
+            {th('Closed', 'Closed', 'l')}
+            {th('Ticker', 'Ticker', 'l', true)}
+            {th('Held', 'Held', 'l', true)}
+            {th('Qty', 'Qty')}
+            {th('Entry', 'Entry')}
+            {th('Exit', 'Exit')}
+            {th('Held_for', 'Held for')}
+            {th('Fees', 'Fees')}
+            {th('PnL', 'P&L')}
+            {th('Per', 'Per ctr')}
+            {th('How', 'Exit', 'l', true)}
+          </tr>
+        </thead>
+        <tbody>
+          {trips.map((t) => (
+            <tr key={t.key}>
+              <td className="l dim">
+                <Stamp ts={t.opened} date />
+              </td>
+              <td className="l dim">
+                {t.closed === null ? <span className="yl">open / settled</span> : <Stamp ts={t.closed} date />}
+              </td>
+              <td className="l">
+                <Ticker value={t.ticker} />
+              </td>
+              <td className={`l ${t.held === 'YES' ? 'bid' : 'ask'}`}>
+                {t.held}
+                {!t.entryMaker && (
+                  <span className="tag neg" data-help="fill:TAKER">
+                    TAKER
+                  </span>
+                )}
+              </td>
+              <td>{qty(t.size)}</td>
+              <td>{px(t.entry)}</td>
+              <td>{t.exit === null ? '—' : px(t.exit)}</td>
+              <td className="dim">{t.closed === null ? '—' : span(t.closed - t.opened)}</td>
+              <td className="dim">{usd(t.fees, 3)}</td>
+              <td className={signClass(t.pnl)}>{t.pnl === null ? '—' : signedUsd(t.pnl)}</td>
+              <td className={signClass(t.pnl)}>
+                {t.pnl === null || !t.size ? '—' : `${((t.pnl / t.size) * 100).toFixed(1)}¢`}
+              </td>
+              <td className={`l ${t.exitHow ? EXIT_CLASS[t.exitHow] : 'dim'}`}>{t.exitHow ?? '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
 const FillLine = memo(function FillLine({ f, fresh }: { f: FillEvent; fresh: boolean }) {
   return (

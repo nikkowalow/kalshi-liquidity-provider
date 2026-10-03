@@ -105,6 +105,18 @@ async def test_history_from_earlier_sessions_is_served(journal) -> None:
         assert (await get_json(client, "/api/state"))["status"] == "ended"
 
 
+async def test_every_fill_is_served_even_beyond_the_tail(journal, monkeypatch) -> None:
+    monkeypatch.setattr(api_module, "TAIL_BYTES", 200)  # only the last few lines
+    journal.event("fill", ticker="OLDEST")
+    for i in range(20):
+        journal.event("log", msg=f"filler {i}")
+    journal.event("fill", ticker="NEWEST")
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None))
+    async with serve(api) as client:
+        fills = await get_json(client, "/api/events?type=fill")
+        assert [e["ticker"] for e in fills] == ["OLDEST", "NEWEST"]  # each once, in order
+
+
 async def test_websocket_says_hello_then_streams_events_and_snapshots(journal) -> None:
     journal.event("order", action="place")
     for i in range(3):

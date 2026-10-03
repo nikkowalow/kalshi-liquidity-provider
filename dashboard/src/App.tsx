@@ -70,7 +70,7 @@ export default function App() {
           />
         }
       />
-      <Kpis state={state} fills={journal.fills.length} rejects={rejects} live={live} />
+      <Kpis state={state} fills={journal.fills.length} rejects={rejects} />
       <Tape fills={journal.fills} orders={journal.orders} logs={journal.logs} />
       <div className="grid">
         <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} onSelect={setSelected} />

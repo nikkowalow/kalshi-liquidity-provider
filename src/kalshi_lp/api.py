@@ -190,9 +190,16 @@ class DashboardApi:
         self.token = secrets.token_urlsafe(24)  # for the buttons; new every start
         self.url: str | None = None
         self.recent = _Recent(KEEP_PER_TYPE)
-        for line in _tail_lines(journal.dir / "events.jsonl", TAIL_BYTES):
+        events = journal.dir / "events.jsonl"
+        # Every fill ever (they're few, and the fill history needs them all); the rest from
+        # the tail, so a large journal doesn't slow start-up.
+        for line in _fill_lines(events):
             with contextlib.suppress(ValueError):
                 self.recent.add(line)
+        for line in _tail_lines(events, TAIL_BYTES):
+            if not _is_fill(line):
+                with contextlib.suppress(ValueError):
+                    self.recent.add(line)
         # The previous session's last snapshot until the bot writes its first.
         self.state: str | None = None
         with contextlib.suppress(OSError):
@@ -532,6 +539,27 @@ def _tail_lines(path: Path, max_bytes: int) -> list[str]:
         data = data[cut + 1 :] if cut >= 0 else b""
     end = data.rfind(b"\n") + 1  # a line still being written waits for next time
     return [line for line in data[:end].decode(errors="replace").splitlines() if line]
+
+
+_FILL_MARK = '"type": "fill"'
+
+
+def _is_fill(line: str) -> bool:
+    return _FILL_MARK in line[:80]  # the journal writes ts and type first
+
+
+def _fill_lines(path: Path) -> list[str]:
+    """Every fill event in the journal file, oldest first (a fast substring scan)."""
+    mark = _FILL_MARK.encode()
+    try:
+        with path.open("rb") as f:
+            return [
+                line.decode(errors="replace").rstrip("\n")
+                for line in f
+                if mark in line[:80] and line.endswith(b"\n")
+            ]
+    except FileNotFoundError:
+        return []
 
 
 def _metric_lines(path: Path, points: int) -> list[str]:

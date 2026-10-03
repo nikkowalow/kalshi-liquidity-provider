@@ -238,14 +238,8 @@ th[data-help], .k[data-help], .t[data-help], h2 > span[data-help], .help-u { tex
 .stamp.fresh .ago { color: var(--green); }
 .bar .stamp .ago { color: inherit; opacity: .75; }
 
-/* KPI tiles: last 5 minutes as a sparkline behind the number; the rewards counter spins. */
+/* KPI tiles: the rewards counter spins. */
 .kpi { position: relative; overflow: hidden; }
-.kpi .k, .kpi .v, .kpi .s, .kpi .meter { position: relative; }
-.kpi .spark { position: absolute; left: 0; bottom: 4px; width: 100%; height: 24px; opacity: .5;
-              pointer-events: none; }
-.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; }
-.spark.up polyline { stroke: var(--green); }
-.spark.down polyline { stroke: var(--red); }
 .ticking { font-variant-numeric: tabular-nums; }
 
 .chart .t .delta { margin-left: 8px; font-size: 10px; text-transform: none; }
