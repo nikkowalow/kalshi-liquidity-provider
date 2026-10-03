@@ -473,6 +473,24 @@ class ApiConfig(_Section):
             "POST /api/control/<action> with the token from <journal>/api-token."
         ),
     )
+    password: str | None = Field(
+        None,
+        description=(
+            "Ask for this password before serving anything (HTTP basic auth, any user name). "
+            "Required to serve beyond localhost (host other than 127.0.0.1). Set it with the "
+            "KLP_DASHBOARD_PASSWORD environment variable, not in the config file."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_exposure(self) -> ApiConfig:
+        local = self.host in ("127.0.0.1", "localhost", "::1")
+        if not local and self.enabled and self.controls and not self.password:
+            raise ValueError(
+                "api.host is not localhost: set KLP_DASHBOARD_PASSWORD, or anyone who opens "
+                "the dashboard could press its buttons"
+            )
+        return self
 
 
 class Credentials(_Section):
@@ -596,4 +614,18 @@ def load_settings(
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} must contain a YAML mapping")
-    return budget_scaled(Settings.model_validate(_deep_merge(raw, overrides or {})))
+    return budget_scaled(
+        Settings.model_validate(_deep_merge(_deep_merge(raw, _env_api()), overrides or {}))
+    )
+
+
+def _env_api() -> dict[str, Any]:
+    """Dashboard settings from the environment (e.g. on a server): host, port, password."""
+    api: dict[str, Any] = {}
+    if os.environ.get("KLP_API_HOST"):
+        api["host"] = os.environ["KLP_API_HOST"]
+    if os.environ.get("KLP_API_PORT"):
+        api["port"] = int(os.environ["KLP_API_PORT"])
+    if os.environ.get("KLP_DASHBOARD_PASSWORD"):
+        api["password"] = os.environ["KLP_DASHBOARD_PASSWORD"]
+    return {"api": api} if api else {}

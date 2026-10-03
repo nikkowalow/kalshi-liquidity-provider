@@ -48,6 +48,7 @@ for scripts:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import heapq
 import hmac
@@ -98,6 +99,7 @@ ENDPOINTS = {
 }
 ACTIONS = ("pause", "resume", "flatten", "rescan", "budget", "stop", "config", "restart")
 TOKEN_FILE = "api-token"
+SESSION_COOKIE = "klp_session"
 URL_FILE = "api-url"  # where a running bot's API listens, for other dashboards to find it
 
 
@@ -198,6 +200,7 @@ class DashboardApi:
         self.cfg = cfg
         self.controls = controls
         self.token = secrets.token_urlsafe(24)  # for the buttons; new every start
+        self._session = secrets.token_urlsafe(24)  # the password's session cookie; new every start
         self.url: str | None = None
         self.recent = _Recent(KEEP_PER_TYPE)
         events = journal.dir / "events.jsonl"
@@ -312,7 +315,7 @@ class DashboardApi:
     # ------------------------------------------------------------------ routes
 
     def _build_app(self) -> web.Application:
-        app = web.Application(middlewares=[self._guard, self._cors])
+        app = web.Application(middlewares=[self._password, self._guard, self._cors])
         app.router.add_get("/api", self._index)
         app.router.add_get("/api/health", self._health)
         app.router.add_get("/api/state", self._state)
@@ -344,6 +347,43 @@ class DashboardApi:
         if _is_local(self.cfg.host) and not _is_local(urlsplit(f"//{request.host}").hostname):
             raise web.HTTPForbidden(text="unexpected Host header")
         return await handler(request)
+
+    @web.middleware
+    async def _password(self, request: web.Request, handler: Handler) -> web.StreamResponse:
+        """With api.password (serving beyond localhost): ask for it before serving anything.
+
+        The browser asks once (HTTP basic auth, any user name); a session cookie then covers
+        the page's own requests and its WebSocket. Scripts may send the control token instead.
+        """
+        password = self.cfg.password
+        if not password or request.path == "/api/health":  # the host's health check: status only
+            return await handler(request)
+        cookie = request.cookies.get(SESSION_COOKIE, "")
+        bearer = request.headers.get("Authorization", "")
+        if hmac.compare_digest(cookie, self._session) or (
+            bearer.startswith("Bearer ") and hmac.compare_digest(bearer[7:], self.token)
+        ):
+            return await handler(request)
+        if bearer.startswith("Basic "):
+            try:
+                _, _, given = base64.b64decode(bearer[6:]).decode().partition(":")
+            except ValueError:
+                given = ""
+            if hmac.compare_digest(given.encode(), password.encode()):
+                response = await handler(request)
+                response.set_cookie(
+                    SESSION_COOKIE,
+                    self._session,
+                    httponly=True,
+                    samesite="Strict",
+                    secure=request.secure or request.headers.get("X-Forwarded-Proto") == "https",
+                )
+                return response
+        return web.Response(
+            status=401,
+            text="password required",
+            headers={"WWW-Authenticate": 'Basic realm="kalshi-lp", charset="UTF-8"'},
+        )
 
     @web.middleware
     async def _cors(self, request: web.Request, handler: Handler) -> web.StreamResponse:

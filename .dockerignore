@@ -1,0 +1,17 @@
+# Never in the image: credentials, local state, build leftovers.
+.env
+.env.*
+secrets/
+*.pem
+*.key
+runs/
+logs/
+.venv/
+**/node_modules/
+dashboard/dist/
+**/__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.git/
+tests/

@@ -427,3 +427,36 @@ async def test_scanner_reports_are_served_and_pushed(journal) -> None:
         assert pushed == {"channel": "scan", "data": {"size": 10, "rows": [{"ticker": "NEW"}]}}
         assert (await get_json(client, "/api/scan"))["rows"] == [{"ticker": "NEW"}]
         await ws.close()
+
+
+async def test_a_password_guards_everything_when_serving_beyond_localhost(journal) -> None:
+    import base64
+
+    api = DashboardApi(
+        journal,
+        ApiConfig(host="0.0.0.0", port=0, static_dir=None, password="hunter2"),
+        FakeControls(),
+    )
+    basic = lambda pw: {"Authorization": "Basic " + base64.b64encode(f"me:{pw}".encode()).decode()}  # noqa: E731
+    async with serve(api) as client:
+        assert (await client.get("/api/health")).status == 200  # the host's health check
+        none = await client.get("/api/state")
+        assert none.status == 401 and "Basic" in none.headers["WWW-Authenticate"]
+        assert (await client.get("/api/state", headers=basic("wrong"))).status == 401
+        ok = await client.get("/api/state", headers=basic("hunter2"))
+        assert ok.status == 200
+        assert "klp_session" in ok.cookies  # the page's later requests ride on this
+        assert (await client.get("/api/markets")).status == 200  # cookie jar: no password again
+        ws = await client.ws_connect("/api/ws")  # and the WebSocket
+        assert (await ws.receive_json())["channel"] == "hello"
+        await ws.close()
+    async with serve(api) as fresh:  # a script: the control token works instead
+        resp = await fresh.post("/api/control/pause", headers=auth(api))
+        assert resp.status == 200
+
+
+def test_serving_beyond_localhost_needs_a_password() -> None:
+    with pytest.raises(ValueError, match="KLP_DASHBOARD_PASSWORD"):
+        ApiConfig(host="0.0.0.0")
+    assert ApiConfig(host="0.0.0.0", password="x").password == "x"
+    assert ApiConfig(host="0.0.0.0", controls=False).controls is False  # read-only: allowed
