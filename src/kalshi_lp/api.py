@@ -164,9 +164,10 @@ class _Client:
 
 
 class _Recent:
-    """The latest events of each type, as JSON lines, so fills aren't crowded out by logs.
+    """The latest events of each type, as JSON lines, so fills aren't crowded out by orders.
 
-    Metrics are left out: the history comes thinned from the metrics file instead.
+    Metrics are left out: the history comes thinned from the metrics file instead. So are log
+    lines older journals still hold (the log lives in logs/*.log now, not the journal).
     """
 
     def __init__(self, per_type: int):
@@ -176,7 +177,7 @@ class _Recent:
     def add(self, line: str) -> None:
         record = json.loads(line)
         kind = record.get("type") if isinstance(record, dict) else None
-        if not isinstance(kind, str) or kind == "metrics":
+        if not isinstance(kind, str) or kind in ("metrics", "log"):
             return
         recent = self._by_type.setdefault(kind, deque(maxlen=self.per_type))
         recent.append((float(record.get("ts") or 0), line))

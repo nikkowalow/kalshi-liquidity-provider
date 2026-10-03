@@ -16,7 +16,7 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 RUN pip install .
 COPY config/ config/
-COPY deploy/start.sh deploy/start.sh
+COPY deploy/ deploy/
 COPY --from=dashboard /dashboard/dist dashboard/dist
 RUN chmod +x deploy/start.sh
 CMD ["deploy/start.sh"]

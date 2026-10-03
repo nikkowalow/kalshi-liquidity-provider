@@ -59,7 +59,7 @@ from kalshi_lp.exchange.errors import KalshiError
 from kalshi_lp.exchange.models import Market, Order
 from kalshi_lp.feed.state import MarketState
 from kalshi_lp.feed.stream import StreamingFeed
-from kalshi_lp.journal import JournalLogHandler, NullJournal, RunJournal
+from kalshi_lp.journal import NullJournal, RunJournal
 from kalshi_lp.strategy.fill_risk import FillRisk, PlannedQuote, estimate_fill_risk
 from kalshi_lp.strategy.quoting import LegDecision, MarketContext, QuoteEngine
 from kalshi_lp.strategy.rewards import (
@@ -303,8 +303,6 @@ class LiquidityBot:
 
     async def run(self, max_requotes: int | None = None) -> None:
         tasks: list[asyncio.Task[None]] = []
-        handler = JournalLogHandler(self.journal)
-        logging.getLogger("kalshi_lp").addHandler(handler)
         s = self.settings
         self.journal.event(
             "run_start",
@@ -345,7 +343,6 @@ class LiquidityBot:
             self.journal.write_state(
                 self.snapshot(status="halted" if self.risk.halted else "ended")
             )
-            logging.getLogger("kalshi_lp").removeHandler(handler)
             self.journal.close()
 
     async def startup(self) -> None:

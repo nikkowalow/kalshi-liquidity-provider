@@ -1,18 +1,17 @@
 import { memo, useMemo, useRef, useState } from 'react'
 import type { Journal } from '../lib/useJournal'
 import { px, qty, sideClass, signClass, signedUsd, usd } from '../lib/format'
-import { toggled } from '../lib/sets'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
 import { type RoundTrip, roundTrips } from '../lib/roundTrips'
 import { useVirtualRows } from '../lib/useVirtualRows'
-import type { FillEvent, FillRiskEvent, LogEvent, MarketsEvent, OrderRow, RiskEstimate } from '../types'
+import type { FillEvent, FillRiskEvent, MarketsEvent, OrderRow, RiskEstimate } from '../types'
 import { competitionRoom } from '../lib/competition'
 import { CompetitionTag } from './CompetitionTag'
 import { FillsCell, NetCell } from './FillRiskCells'
 import { span } from '../lib/clock'
 import { Flash } from './Flash'
-import { Chips, Empty, Panel, PanelHeader } from './Panel'
+import { Empty, Panel, PanelHeader } from './Panel'
 import { PadRow } from './PadRow'
 import { SortTh } from './SortTh'
 import { Stamp } from './Stamp'
@@ -411,81 +410,6 @@ const FillLine = memo(function FillLine({
         </>
       )}
     </tr>
-  )
-})
-
-const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const
-type Level = (typeof LEVELS)[number]
-
-interface KeyedLine {
-  key: string
-  line: LogEvent
-}
-
-/** Log lines newest first, each with a key that stays put as new lines arrive. */
-function keyedLines(logs: LogEvent[], levels: ReadonlySet<Level>): KeyedLine[] {
-  const seen = new Map<string, number>()
-  const out: KeyedLine[] = []
-  for (const line of logs) {
-    const base = `${line.ts}|${line.msg}`
-    const n = seen.get(base) ?? 0
-    seen.set(base, n + 1)
-    if (levels.has(line.level as Level)) out.push({ key: `${base}#${n}`, line })
-  }
-  return out.reverse()
-}
-
-const LogLine = memo(function LogLine({ l, fresh }: { l: LogEvent; fresh: boolean }) {
-  return (
-    <tr className={`${l.level}${fresh ? ' row-new' : ''}`}>
-      <td className="dim">
-        <Stamp ts={l.ts} />
-      </td>
-      <td>{l.level.slice(0, 4)}</td>
-      <td className="dim">{l.logger.replace('kalshi_lp.', '')}</td>
-      <td title={l.msg}>{l.msg}</td>
-    </tr>
-  )
-})
-
-/** Re-renders only on new log lines, a level toggle, or scrolling; draws visible lines only. */
-export const LogPanel = memo(function LogPanel({ logs }: { logs: LogEvent[] }) {
-  const [levels, setLevels] = useState<ReadonlySet<Level>>(
-    () => new Set<Level>(['INFO', 'WARNING', 'ERROR', 'CRITICAL']),
-  )
-  const lines = useMemo(() => keyedLines(logs, levels), [logs, levels])
-  const keys = useMemo(() => lines.map((l) => l.key), [lines])
-  const fresh = useFreshKeys(keys)
-  const body = useRef<HTMLDivElement>(null)
-  const win = useVirtualRows(body, lines.length)
-  return (
-    <Panel
-      title="Log"
-      help="panel:log"
-      note={
-        <>
-          {lines.length} · tailing <span className="cursor">█</span>
-        </>
-      }
-      span={7}
-      height="md"
-      bodyRef={body}
-      tools={<Chips options={LEVELS} selected={levels} onToggle={(l) => setLevels((s) => toggled(s, l))} helpPrefix="level" />}
-    >
-      {lines.length === 0 ? (
-        <Empty>nothing logged yet</Empty>
-      ) : (
-        <table className="log vt">
-          <tbody>
-            <PadRow height={win.padTop} cols={4} />
-            {lines.slice(win.start, win.end).map(({ key, line }) => (
-              <LogLine key={key} l={line} fresh={fresh.has(key)} />
-            ))}
-            <PadRow height={win.padBottom} cols={4} />
-          </tbody>
-        </table>
-      )}
-    </Panel>
   )
 })
 

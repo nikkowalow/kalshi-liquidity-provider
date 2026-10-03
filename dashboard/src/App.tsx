@@ -5,7 +5,7 @@ import { HelpLayer } from './components/HelpLayer'
 import { Kpis } from './components/Kpis'
 import { MarketDetail } from './components/MarketDetail'
 import { MarketsTable } from './components/MarketsTable'
-import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/SidePanels'
+import { OrdersAndFills, RunConfig, Selections } from './components/SidePanels'
 import { Scanner } from './components/Scanner'
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
@@ -73,14 +73,13 @@ export default function App() {
         }
       />
       <Kpis state={state} fills={journal.fills.length} rejects={rejects} />
-      <Tape fills={journal.fills} orders={journal.orders} logs={journal.logs} />
+      <Tape fills={journal.fills} orders={journal.orders} />
       <div className="grid">
         <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} onSelect={setSelected} />
         <Charts journal={journal} state={state} live={live} />
         <Scanner scan={raw.scan} />
         <Blotter orders={journal.orders} fills={journal.fills} quotes={journal.quotes} />
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />
-        <LogPanel logs={journal.logs} />
         <Selections selections={journal.selections} />
         <RunConfig
           start={journal.start}

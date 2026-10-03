@@ -18,6 +18,17 @@ ln -sfn "$DATA/runs" runs
 ln -sfn "$DATA/logs" logs
 [ -w "$DATA/runs" ] || { echo "KLP_DATA_DIR $DATA is not writable: mount a volume there" >&2; exit 1; }
 
+# Journal carried over from another machine (deploy/make_seed.sh): unpacked once, and only
+# into a volume with no journal of its own, so it never overwrites the server's history.
+SEED=deploy/seed/runs.tar.gz
+if [ -f "$SEED" ]; then
+  name="$(tar tzf "$SEED" 2>/dev/null | grep -v '^\._\|/\._' | head -1 | cut -d/ -f1)"
+  if [ -n "$name" ] && [ ! -e "$DATA/runs/$name/state.json" ]; then
+    tar xzf "$SEED" -C "$DATA/runs" --exclude='._*' 2>/dev/null
+    echo "seeded the journal $name from $SEED"
+  fi
+fi
+
 # The private keys come in as text; the bot reads them from a file.
 for env in PROD DEMO; do
   eval "pem=\${KALSHI_${env}_PRIVATE_KEY:-}"
@@ -25,6 +36,17 @@ for env in PROD DEMO; do
     file="$DATA/secrets/$(echo "$env" | tr 'A-Z' 'a-z').key"
     (umask 077 && printf '%s\n' "$pem" > "$file")
     export "KALSHI_${env}_PRIVATE_KEY_PATH=$file"
+  fi
+done
+
+# A *_PATH copied from a laptop's .env points at a file that isn't here: say what to do.
+for env in PROD DEMO; do
+  eval "path=\${KALSHI_${env}_PRIVATE_KEY_PATH:-}"
+  if [ -n "$path" ] && [ ! -f "$path" ]; then
+    echo "KALSHI_${env}_PRIVATE_KEY_PATH=$path: no such file on this server." >&2
+    echo "  Delete that variable and set KALSHI_${env}_PRIVATE_KEY to the key's text instead" >&2
+    echo "  (the whole file, -----BEGIN ... to ...END-----)." >&2
+    exit 1
   fi
 done
 

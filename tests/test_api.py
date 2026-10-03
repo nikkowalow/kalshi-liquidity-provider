@@ -121,7 +121,7 @@ async def test_every_fill_is_served_even_beyond_the_tail(journal, monkeypatch) -
     monkeypatch.setattr(api_module, "TAIL_BYTES", 200)  # only the last few lines
     journal.event("fill", ticker="OLDEST")
     for i in range(20):
-        journal.event("log", msg=f"filler {i}")
+        journal.event("quote", ticker="B-1", seq=i)
     journal.event("fill", ticker="NEWEST")
     api = DashboardApi(journal, ApiConfig(port=0, static_dir=None))
     async with serve(api) as client:
@@ -268,7 +268,7 @@ async def test_a_client_that_falls_behind_is_disconnected(journal, monkeypatch) 
         ws = await client.ws_connect("/api/ws")
         await ws.receive_json()
         for _ in range(3):  # all before the sender gets to run
-            journal.event("log", msg="x")
+            journal.event("order", action="place")
         msg = await ws.receive()
         assert msg.type == WSMsgType.CLOSE and msg.data == WSCloseCode.TRY_AGAIN_LATER
 
@@ -460,3 +460,11 @@ def test_serving_beyond_localhost_needs_a_password() -> None:
         ApiConfig(host="0.0.0.0")
     assert ApiConfig(host="0.0.0.0", password="x").password == "x"
     assert ApiConfig(host="0.0.0.0", controls=False).controls is False  # read-only: allowed
+
+
+async def test_log_lines_in_older_journals_are_not_sent(journal) -> None:
+    journal.event("log", level="INFO", logger="kalshi_lp", msg="from before")
+    journal.event("fill", ticker="A")
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None))
+    async with serve(api) as client:
+        assert [e["type"] for e in await get_json(client, "/api/events")] == ["fill"]

@@ -5,7 +5,7 @@ to the same directory, so stopping and restarting the bot (say, after a code
 or config change) continues one history instead of starting a new one:
 
     runs/prod-live/
-        events.jsonl   append-only: orders, fills, quote changes, selections, logs
+        events.jsonl   append-only: orders, fills, quote changes, selections (logs: logs/*.log)
         metrics.jsonl  append-only: the totals every 10 seconds (the dashboard charts)
         state.json     latest full snapshot, rewritten about once a second
         scan.json      the market scanner's latest report (every rewarded market's $/day)
@@ -270,21 +270,3 @@ def _unattributed(runs: list[Path]) -> float:
         by_market = sum(row.get("earned") or 0 for row in state.get("markets", []))
         missing += max(total - by_market, 0.0)
     return missing
-
-
-class JournalLogHandler(logging.Handler):
-    """Mirrors the bot's log lines into the journal as ``log`` events."""
-
-    def __init__(self, journal: RunJournal, level: int = logging.INFO):
-        super().__init__(level)
-        self.journal = journal
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if not record.name.startswith("kalshi_lp"):
-            return
-        try:
-            self.journal.event(
-                "log", level=record.levelname, logger=record.name, msg=record.getMessage()
-            )
-        except Exception:
-            self.handleError(record)

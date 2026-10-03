@@ -25,6 +25,24 @@ variables and a volume.
 
 Then deploy (`railway up`, or push to the connected GitHub branch).
 
+## Bringing your history over (once)
+
+The journal on your laptop (`runs/prod-live`: reward ledger, payout tracking, fills, balance
+readings) can come along, so the server carries on where the laptop left off:
+
+1. Stop the bot on the laptop (Ctrl+C), so nothing more is written.
+2. `deploy/make_seed.sh`: packs it into `deploy/seed/runs.tar.gz` (~8 MB; the old log lines
+   are left out). Git ignores it; `railway up` still uploads it.
+3. `railway up`. On its first start the server unpacks it onto the volume. Only into an empty
+   one: a volume that already has a journal is never overwritten.
+4. Delete `deploy/seed/` afterwards (it isn't needed again).
+
+## If it won't start
+
+- `KALSHI_PROD_PRIVATE_KEY_PATH=secrets/prod.key: no such file on this server`: that variable
+  was copied from your laptop's `.env`. Delete it in Railway and set `KALSHI_PROD_PRIVATE_KEY`
+  to the key's text instead.
+
 ## Good to know
 
 - Railway restarts the bot if it exits; open positions carry over a restart.

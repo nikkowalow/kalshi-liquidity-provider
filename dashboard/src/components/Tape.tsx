@@ -12,12 +12,8 @@ interface TapeItem {
   trade?: { ticker: string; side: string; size: string; reason?: string } // colored separately
 }
 
-/** Scrolling ticker of the latest bot activity: fills, orders, and warnings. */
-export const Tape = memo(function Tape({
-  fills,
-  orders,
-  logs,
-}: Pick<Journal, 'fills' | 'orders' | 'logs'>) {
+/** Scrolling ticker of the latest bot activity: fills and orders. */
+export const Tape = memo(function Tape({ fills, orders }: Pick<Journal, 'fills' | 'orders'>) {
   const items = useMemo(() => {
     const out: TapeItem[] = []
     for (const f of fills.slice(-15)) {
@@ -38,13 +34,8 @@ export const Tape = memo(function Tape({
         trade: { ticker: o.ticker, side: o.side, size: `${qty(o.size)}@${px(o.price)}`, reason: o.reason },
       })
     }
-    for (const l of logs.slice(-200)) {
-      if (l.level === 'WARNING' || l.level === 'ERROR' || l.level === 'CRITICAL') {
-        out.push({ key: `l${l.ts}${l.msg}`, ts: l.ts, cls: l.level === 'WARNING' ? 'yl' : 'neg', text: l.msg })
-      }
-    }
     return out.sort((a, b) => b.ts - a.ts).slice(0, 40)
-  }, [fills, orders, logs])
+  }, [fills, orders])
 
   if (!items.length) return <div className="tape" data-help="panel:tape" />
   const run = (copy: string) =>

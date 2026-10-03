@@ -5,7 +5,6 @@ import type {
   FillEvent,
   FillRiskEvent,
   JournalEvent,
-  LogEvent,
   MarketsEvent,
   MetricsEvent,
   OrderEvent,
@@ -33,7 +32,6 @@ export interface Journal {
   fills: FillEvent[]
   fillRisks: FillRiskEvent[] // fill-risk record of each fill (when the market was entered, at the fill)
   quotes: QuoteEvent[]
-  logs: LogEvent[]
   selections: MarketsEvent[]
   metrics: MetricsEvent[]
   start: RunStartEvent | null
@@ -45,7 +43,6 @@ const emptyJournal = (): Journal => ({
   fills: [],
   fillRisks: [],
   quotes: [],
-  logs: [],
   selections: [],
   metrics: [],
   start: null,
@@ -74,9 +71,6 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
       case 'quote':
         j = { ...j, quotes: append(j.quotes, e) }
         break
-      case 'log':
-        j = { ...j, logs: append(j.logs, e) }
-        break
       case 'markets':
         j = { ...j, selections: append(j.selections, e) }
         break
@@ -84,19 +78,6 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
         // Skip samples the thinned history already covers.
         if (j.metrics.length && e.ts <= j.metrics[j.metrics.length - 1].ts) break
         j = { ...j, metrics: append(j.metrics, e, MAX_METRICS) }
-        break
-      case 'ws':
-        // Connection changes show up in the log panel.
-        j = {
-          ...j,
-          logs: append(j.logs, {
-            type: 'log',
-            ts: e.ts,
-            level: e.status === 'connected' ? 'INFO' : 'WARNING',
-            logger: 'ws',
-            msg: `websocket ${e.status}`,
-          }),
-        }
         break
       case 'run_start':
         j = { ...j, start: e, end: null } // a restart continues the same journal

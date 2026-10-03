@@ -272,13 +272,6 @@ export interface QuoteEvent extends Base {
   dry_run: boolean
 }
 
-export interface LogEvent extends Base {
-  type: 'log'
-  level: string
-  logger: string
-  msg: string
-}
-
 export interface MarketsEvent extends Base {
   type: 'markets'
   markets: {
@@ -324,7 +317,6 @@ export type JournalEvent =
   | FillEvent
   | FillRiskEvent
   | QuoteEvent
-  | LogEvent
   | MarketsEvent
   | MetricsEvent
   | WsEvent

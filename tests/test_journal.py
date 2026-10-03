@@ -1,14 +1,13 @@
 """Run journal."""
 
 import json
-import logging
 import os
 import time
 from decimal import Decimal
 
 import pytest
 
-from kalshi_lp.journal import JournalLogHandler, RunJournal
+from kalshi_lp.journal import RunJournal
 from tests.factories import make_book, make_market
 from tests.fake_exchange import FakeExchange, FakeFeed
 from tests.test_bot import T, program, settings, step
@@ -26,18 +25,6 @@ def test_journal_writes_events_and_state(tmp_path) -> None:
     [event] = read_events(j)
     assert event["type"] == "order" and event["price"] == 0.45 and "ts" in event
     assert json.loads((j.dir / "state.json").read_text()) == {"status": "running", "x": 1.5}
-
-
-def test_log_handler_mirrors_bot_logs_only(tmp_path) -> None:
-    j = RunJournal(tmp_path, "demo", "dry")
-    handler = JournalLogHandler(j)
-    logging.getLogger("kalshi_lp.test").addHandler(handler)
-    logging.getLogger("kalshi_lp.test").setLevel(logging.INFO)
-    logging.getLogger("kalshi_lp.test").warning("hello %s", "world")
-    handler.emit(logging.LogRecord("httpx", logging.INFO, "", 0, "noise", (), None))
-    logging.getLogger("kalshi_lp.test").removeHandler(handler)
-    j.close()
-    assert [e["msg"] for e in read_events(j)] == ["hello world"]
 
 
 async def test_bot_journals_orders_quotes_and_snapshot(tmp_path) -> None:

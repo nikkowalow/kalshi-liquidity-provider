@@ -65,7 +65,6 @@ export const HELP: Record<string, HelpEntry> = {
   "panel:blotter": ["Blotter", "Everything the bot did, newest first: orders placed, cancelled, shrunk, or rejected, fills, and quote changes. Use the buttons to filter by type and the box to filter by ticker."],
   "panel:orders": ["Resting orders", "The bot's orders sitting on the order book right now."],
   "panel:fills": ["Fills", "Trades that happened against the bot's orders this run."],
-  "panel:log": ["Log", "The bot's own log messages. Yellow is a warning and red is an error. The level buttons filter what's shown."],
   "panel:selection": ["Market selection history", "Each time the bot's market scan (every minute) changed which markets it quotes: the markets it chose, best $/h first."],
   "panel:config": ["Run config", "The full settings this run started with (from config/*.yaml plus command-line flags)."],
 
@@ -172,7 +171,7 @@ export const HELP: Record<string, HelpEntry> = {
   "rank:partial": ["Partly inside", "Only part of this order is within the first Target Size contracts on its side. The rest earns nothing until orders ahead fill or cancel."],
   "rank:out": ["Outside Target Size", "More than Target Size contracts sit ahead of this order, so it earns no reward right now. On its next requote (within seconds) the bot moves it up to the lowest price that gets it back inside, as long as that stays within its safety limits (cushion, distance from mid, never crossing); if no such price exists, it pulls the order, since it would only carry fill risk."],
   "rank:unknown": ["Unknown", "No program data or live book for this market yet."],
-  "panel:tape": ["Tape", "A scrolling feed of the bot's latest activity: fills (magenta), orders placed, cancelled, or shrunk, and warnings. Hover to pause it."],
+  "panel:tape": ["Tape", "A scrolling feed of the bot's latest activity: fills (magenta) and orders placed, cancelled, or shrunk. Hover to pause it."],
   "fill:Side": ["Side", "BID means you bought YES. ASK means you sold YES, or bought NO."],
   "fill:Price": ["Price", "Trade price in YES terms."],
   "fill:Qty": ["Qty", "Contracts traded."],
@@ -184,11 +183,6 @@ export const HELP: Record<string, HelpEntry> = {
   "sel:Closes": ["Closes", "When the market stops trading."],
 
   // log levels
-  "level:DEBUG": ["DEBUG", "Very detailed messages. Only produced when the bot runs with -v."],
-  "level:INFO": ["INFO", "Normal activity."],
-  "level:WARNING": ["WARNING", "Something noteworthy that the bot handled, such as a pause, a budget limit, or a reconnect."],
-  "level:ERROR": ["ERROR", "Something failed. The bot usually retries."],
-  "level:CRITICAL": ["CRITICAL", "Serious: a halt, or the bot couldn't cancel its orders. Check it now."],
 }
 
 // Why the bot chose a quote's price. Matched by prefix since some include numbers.
