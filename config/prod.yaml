@@ -121,7 +121,7 @@ quoting:
   min_quote_life_seconds: 10 # no reward-chasing moves for 10s (safety moves still immediate)
 
 risk:
-  max_capital: 260 # $ cap: position cost + cash locked in resting orders (actual $, per price)
+  max_capital: 500 # $ cap: position cost + cash locked in resting orders (actual $, per price)
   scale_with_budget: true # size the 6 settings marked (budget) from max_capital: change the budget
   # and they follow. per side = max_capital x 0.95 / (max_markets x 2); see config.budget_scaled
   max_position_per_market: 150 # (budget: ignored while scale_with_budget is on) also caps order size; keep >= quoting.max_size

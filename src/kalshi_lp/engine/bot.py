@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import random
 import time
@@ -31,6 +32,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
+from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
@@ -38,7 +40,7 @@ import httpx
 from kalshi_lp.config import Settings, budget_scaled
 from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.types import ZERO, Leg, Quote, Side
-from kalshi_lp.engine import budget, fill_records
+from kalshi_lp.engine import balance_history, budget, fill_records
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
 from kalshi_lp.engine.payouts import PayoutTracker
 from kalshi_lp.engine.queue import queue_report
@@ -77,6 +79,7 @@ FLATTEN_WARN_SECONDS = 300.0  # "can't flatten" is logged at most this often per
 SCANNER_FIRST_DELAY = 20.0  # seconds after start-up: the first market scan goes first
 LIVE_FILL_RISK_SECONDS = 60.0  # re-estimate fill risk from the resting orders this often
 PAYOUT_CHECK_SECONDS = 300.0  # reconcile the balance for reward payouts this often
+BALANCE_HISTORY_SECONDS = 30.0  # reuse the balance history this long between dashboard asks
 CLOSED_PROGRAMS_SECONDS = 600.0  # refresh which ended program periods still await payout
 BOOK_LEVELS = 10  # bid levels per side in each snapshot's book (the market popup's ladder)
 
@@ -183,6 +186,7 @@ class LiquidityBot:
         # Ended program periods Kalshi hasn't paid out yet ("ticker|end"); None: not fetched.
         self._closed_periods: set[str] | None = None
         self._closed_at = float("-inf")
+        self._balance_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._selected_at: dict[str, float] = {}  # ticker -> monotonic time it was selected
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
@@ -1339,6 +1343,30 @@ class LiquidityBot:
                 log.exception("payout check crashed; retrying next interval")
             await self._sleep(PAYOUT_CHECK_SECONDS)
 
+    async def balance_history(self) -> list[dict[str, Any]]:
+        """Every balance change since the journal's first balance reading, newest first.
+
+        Cached for BALANCE_HISTORY_SECONDS: the dashboard may ask often.
+        """
+        now = time.monotonic()
+        if (
+            self._balance_cache is not None
+            and now - self._balance_cache[0] < BALANCE_HISTORY_SECONDS
+        ):
+            return self._balance_cache[1]
+        path = getattr(self.journal, "dir", None)
+        samples = await asyncio.to_thread(_balance_samples, path / "metrics.jsonl") if path else []
+        since = samples[0][0] if samples else time.time()
+        records = {
+            kind: await self.client.get_cash_records(
+                kind, min_ts=since if kind in ("fills", "settlements") else None
+            )
+            for kind in ("fills", "settlements", "deposits", "withdrawals")
+        }
+        changes = balance_history.history(records, samples, since)
+        self._balance_cache = (now, changes)
+        return changes
+
     async def refresh_closed_programs(self) -> None:
         """Which ended program periods still await payout. An ended period not among them
         has been paid out by Kalshi (status "paid_out"), whether or not it paid us."""
@@ -1721,6 +1749,18 @@ def _competition_text(comp: Competition | None) -> str:
         return "competition ?"
     room = "Target Size not reached" if comp.room is None else f"room {comp.room * 100:.0f}c"
     return f"competition {comp.level}, {room}"
+
+
+def _balance_samples(path: Path) -> list[tuple[float, Decimal]]:
+    """(time, balance) from the journal's totals history (metrics.jsonl), oldest first."""
+    out = []
+    with contextlib.suppress(OSError), path.open() as f:
+        for line in f:
+            with contextlib.suppress(ValueError, KeyError):
+                e = json.loads(line)
+                if e.get("balance") is not None:
+                    out.append((float(e["ts"]), Decimal(str(e["balance"]))))
+    return out
 
 
 def _period_status(ticker: str, end: str, closed: set[str] | None) -> str | None:

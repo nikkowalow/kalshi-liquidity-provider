@@ -340,3 +340,6 @@ button.bot-item:not(:disabled) { cursor: pointer; }
 button.bot-item:not(:disabled):hover { background: var(--hover); }
 .bot-item.on { background: var(--tint-2); }
 .st-input.locked { pointer-events: none; opacity: .6; }
+.kpi.clickable { cursor: pointer; }
+.kpi.clickable:hover { background: var(--hover); }
+.bh-sum { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); }

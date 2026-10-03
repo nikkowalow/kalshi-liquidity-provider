@@ -90,6 +90,7 @@ ENDPOINTS = {
     "/api/scan": "the market scanner: the best markets by $/day at a fixed size (read-only)",
     "/api/ws": "WebSocket: a hello (state, events, metrics), then events and snapshots live",
     "/api/bots": "every bot running from this runs folder (the dashboard's bot switcher)",
+    "/api/balance": "every balance change (fills, settlements, deposits, payouts) with its time",
     "/api/config": "the editable settings: file values, running values, schema",
     "/api/history/<ticker>": "every order action in one market, from the whole journal",
     "/api/control/<action>": "POST with the token: pause, resume, flatten, rescan, budget, stop, "
@@ -112,6 +113,7 @@ class Controls(Protocol):
     def config(self) -> dict[str, Any]: ...
     async def set_config(self, changes: dict[str, Any]) -> str: ...
     async def restart(self) -> str: ...
+    async def balance_history(self) -> list[dict[str, Any]]: ...
 
 
 NOT_BUILT = """<!doctype html><title>KLP Terminal</title>
@@ -321,6 +323,7 @@ class DashboardApi:
         app.router.add_get("/api/scan", self._scan)
         app.router.add_get("/api/config", self._config)
         app.router.add_get("/api/bots", self._bots)
+        app.router.add_get("/api/balance", self._balance)
         app.router.add_get("/api/history/{ticker}", self._history)
         app.router.add_get("/api/ws", self._ws)
         app.router.add_post("/api/control/{action}", self._control)
@@ -362,6 +365,20 @@ class DashboardApi:
         response = await handler(request)
         response.headers.update(headers)
         return response
+
+    async def _balance(self, _: web.Request) -> web.Response:
+        if self.controls is None:
+            return _refuse(404, "the bot's controls are switched off (api.controls)")
+        try:
+            changes = await self.controls.balance_history()
+        except ControlError as exc:
+            return _refuse(400, str(exc))
+        except Exception as exc:  # Kalshi unreachable, say: report it, don't crash the page
+            log.warning("balance history failed: %s", exc)
+            return _refuse(502, f"couldn't read the account from Kalshi: {exc}")
+        return web.Response(
+            text=json.dumps(changes, default=_json_default), content_type="application/json"
+        )
 
     async def _bots(self, _: web.Request) -> web.Response:
         """Bots that registered an API in this runs folder (each journal's api-url)."""
@@ -542,6 +559,12 @@ class DashboardApi:
             path = index
         headers = {"Cache-Control": "no-store"} if path == index else None
         return web.FileResponse(path, headers=headers)
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, Decimal):
+        return float(value)
+    raise TypeError(f"not JSON-able: {type(value).__name__}")
 
 
 def _is_local(host: str | None) -> bool:

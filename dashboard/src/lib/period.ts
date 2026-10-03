@@ -56,3 +56,30 @@ export function periodView(m: MarketRow, now: number): PeriodView {
     fillBasis,
   }
 }
+
+export interface TimeToThreshold {
+  seconds: number | null // until earnings this period reach the minimum; null: can't tell
+  reached: boolean // already at or past it
+  inTime: boolean | null // reaches it before earning stops for the period
+  basis: 'live' | 'estimate' | null // the rate used: last ~10 min, or the selection estimate
+}
+
+/**
+ * Time to threshold: how long until this period's earnings reach Kalshi's payout minimum,
+ * at the live rate (last ~10 minutes), or the selection estimate when nothing is earning now.
+ */
+export function timeToThreshold(m: MarketRow, now: number, minimum: number): TimeToThreshold {
+  const p = periodView(m, now)
+  if (p.earned >= minimum) return { seconds: 0, reached: true, inTime: true, basis: null }
+  const live = m.rate_per_hour > 0
+  const perHour = live ? m.rate_per_hour : (m.est_daily_reward ?? 0) / 24
+  if (perHour <= 0) return { seconds: null, reached: false, inTime: false, basis: null }
+  const seconds = ((minimum - p.earned) / perHour) * 3600
+  const left = p.earningEnd === null ? null : p.earningEnd - now
+  return {
+    seconds,
+    reached: false,
+    inTime: left === null ? null : seconds <= left,
+    basis: live ? 'live' : 'estimate',
+  }
+}

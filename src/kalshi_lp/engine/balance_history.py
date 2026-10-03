@@ -40,7 +40,9 @@ def _ts(record: Mapping[str, Any], *keys: str) -> float | None:
     return None
 
 
-def listed_changes(records: Mapping[str, Sequence[Mapping[str, Any]]], since: float) -> list[dict[str, Any]]:
+def listed_changes(
+    records: Mapping[str, Sequence[Mapping[str, Any]]], since: float
+) -> list[dict[str, Any]]:
     """The balance changes Kalshi lists: one per fill, settlement, deposit and withdrawal.
 
     A fill's cash is counted in Kalshi's terms: buying YES pays the YES price; selling YES
@@ -49,8 +51,9 @@ def listed_changes(records: Mapping[str, Sequence[Mapping[str, Any]]], since: fl
     """
     out: list[dict[str, Any]] = []
     positions: dict[str, Decimal] = {}
-    for f in sorted(records.get("fills", []), key=lambda r: _ts(r, "ts", "created_time") or 0):
-        ts = _ts(f, "ts", "created_time")
+    # created_time has microseconds: an entry and its exits in the same second stay in order.
+    for f in sorted(records.get("fills", []), key=lambda r: _ts(r, "created_time", "ts") or 0):
+        ts = _ts(f, "created_time", "ts")
         ticker = str(f.get("ticker") or f.get("market_ticker"))
         price, count = _d(f.get("yes_price_dollars")), _d(f.get("count_fp") or f.get("count"))
         before = positions.get(ticker, ZERO)
@@ -62,16 +65,18 @@ def listed_changes(records: Mapping[str, Sequence[Mapping[str, Any]]], since: fl
         fee = _d(f.get("fee_cost"))
         if ts is None or ts < since:
             continue
-        side = "buy YES" if bid else ("sell YES" if before > 0 else "buy NO")
-        if bid and before < 0:
-            side = "sell NO"
+        # Name it as Kalshi books it, at the price of the side that traded.
+        if bid:
+            side, leg_price = ("sell NO", 1 - price) if before < 0 else ("buy YES", price)
+        else:
+            side, leg_price = ("sell YES", price) if before > 0 else ("buy NO", 1 - price)
         out.append(
             {
                 "ts": ts,
                 "kind": "fill",
                 "ticker": ticker,
                 "amount": cash - fee,
-                "detail": f"{side} {count.normalize():f} @ {price.normalize():f}"
+                "detail": f"{side} {count.normalize():f} @ {leg_price.normalize():f}"
                 + (f", fee ${fee:.4f}" if fee else "")
                 + (" (taker)" if f.get("is_taker") else ""),
             }

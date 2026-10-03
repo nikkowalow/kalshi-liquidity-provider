@@ -56,6 +56,9 @@ class FakeControls:
     async def restart(self) -> str:
         return await self._act("restart")
 
+    async def balance_history(self) -> list[dict[str, object]]:
+        return [{"ts": 1.0, "kind": "reward", "amount": Decimal("1.79")}]
+
 
 @pytest.fixture
 def journal(tmp_path):
@@ -354,6 +357,14 @@ async def test_settings_are_read_freely_but_saved_with_the_token(journal) -> Non
     off = DashboardApi(journal, ApiConfig(port=0, static_dir=None))  # controls switched off
     async with serve(off) as client:
         assert (await client.get("/api/config")).status == 404
+
+
+async def test_balance_history_is_served(journal) -> None:
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None), FakeControls())
+    async with serve(api) as client:
+        assert await get_json(client, "/api/balance") == [
+            {"ts": 1.0, "kind": "reward", "amount": 1.79}
+        ]
 
 
 async def test_one_action_at_a_time(journal) -> None:

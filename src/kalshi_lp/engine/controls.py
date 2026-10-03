@@ -139,3 +139,9 @@ class BotControls:
         self.bot.restart_requested = True
         self.bot.stop()
         return "restarting with the saved config: back in a few seconds (open positions carry over)"
+
+    async def balance_history(self) -> list[dict[str, Any]]:
+        """Every change to the account balance, with when it happened (newest first)."""
+        if self.bot.settings.dry_run:
+            raise ControlError("dry run: no account to read")
+        return await self.bot.balance_history()

@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useCallback, useState } from 'react'
 import { num, qty, signClass, signedUsd, usd } from '../lib/format'
 import type { RunState } from '../types'
+import { BalanceHistory } from './BalanceHistory'
 import { Flash } from './Flash'
 import { Ticking } from './Ticking'
 
@@ -10,15 +11,22 @@ function Kpi({
   raw,
   sub,
   meter,
+  onClick,
 }: {
   label: string
   value: ReactNode
   raw?: unknown // underlying value; a change makes the tile flash
   sub?: ReactNode
   meter?: number | null
+  onClick?: () => void // the tile opens something (e.g. the balance history)
 }) {
   return (
-    <div className="kpi">
+    <div
+      className={`kpi${onClick ? ' clickable' : ''}`}
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      title={onClick ? 'click for details' : undefined}
+    >
       <div className="k" data-help={`kpi:${label}`}>
         {label}
       </div>
@@ -45,12 +53,21 @@ export function Kpis({
   rejects: number
 }) {
   const t = state?.totals
+  const [balanceOpen, setBalanceOpen] = useState(false)
+  const closeBalance = useCallback(() => setBalanceOpen(false), [])
   const cap = num(t?.capital_in_use)
   const max = num(t?.max_capital)
   const rate = num(t?.rewards_per_hour)
   return (
     <div className="kpis">
-      <Kpi label="Balance" value={usd(t?.balance)} raw={num(t?.balance)} />
+      <Kpi
+        label="Balance"
+        value={usd(t?.balance)}
+        raw={num(t?.balance)}
+        sub="click for every change"
+        onClick={() => setBalanceOpen(true)}
+      />
+      {balanceOpen && <BalanceHistory onClose={closeBalance} />}
       <Kpi
         label="Capital in use"
         value={usd(cap)}

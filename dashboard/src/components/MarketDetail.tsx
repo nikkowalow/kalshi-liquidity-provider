@@ -3,7 +3,7 @@ import { apiUrl } from '../lib/api'
 import type { Journal } from '../lib/useJournal'
 import { num, pct, px, qty, sideClass, signClass, signedUsd, usd } from '../lib/format'
 import { span, useNow } from '../lib/clock'
-import { periodView } from '../lib/period'
+import { periodView, timeToThreshold } from '../lib/period'
 import type { FillEvent, LegQuote, MarketRow, OrderEvent, OrderRow } from '../types'
 import { CompetitionTag } from './CompetitionTag'
 import { RankBadge } from './SidePanels'
@@ -363,6 +363,7 @@ export function MarketDetail({
   const paying = m.snapshots ? m.paying_snapshots / m.snapshots : null
   const periods = m.periods ?? []
   const pv = periodView(m, now)
+  const ttt = timeToThreshold(m, now, payoutMinimum)
   const { earned: periodEarned, projected } = pv
   const flags = [
     m.inactive && 'not quoted now (past market)',
@@ -399,6 +400,15 @@ export function MarketDetail({
         <div className="md-grid">
           <Card title="Our rewards">
             <PayoutBar earned={periodEarned} minimum={payoutMinimum} />
+            <Field label={`Time to ${usd(payoutMinimum)} (TTT)`}>
+              <span data-help="detail:ttt" className={ttt.reached ? 'pos' : ttt.inTime === false ? 'neg' : ttt.inTime ? 'yl' : 'dim'}>
+                {ttt.reached
+                  ? 'reached this period'
+                  : ttt.seconds === null
+                    ? 'not earning now'
+                    : `${span(ttt.seconds)}${ttt.basis === 'estimate' ? ' (est.)' : ''}${ttt.inTime === false ? ' · after the period ends' : ''}`}
+              </span>
+            </Field>
             <Field label="Paid by Kalshi (actual)" cls="pos">
               <span data-help="detail:paid">{m.paid == null ? 'nothing matched yet' : usd(m.paid, 4)}</span>
             </Field>
