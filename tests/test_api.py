@@ -312,3 +312,17 @@ async def test_token_file_is_private_and_removed_on_stop(journal) -> None:
     await api.stop()
     assert not token_file.exists()
     assert DashboardApi(journal, ApiConfig()).token != api.token  # new every start
+
+
+async def test_scanner_reports_are_served_and_pushed(journal) -> None:
+    journal.write_scan({"size": 10, "rows": [{"ticker": "OLD"}]})  # from before a restart
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None))
+    async with serve(api) as client:
+        assert (await get_json(client, "/api/scan"))["rows"] == [{"ticker": "OLD"}]
+        ws = await client.ws_connect("/api/ws")
+        assert (await ws.receive_json())["scan"]["rows"] == [{"ticker": "OLD"}]
+        journal.write_scan({"size": 10, "rows": [{"ticker": "NEW"}]})
+        pushed = await ws.receive_json()
+        assert pushed == {"channel": "scan", "data": {"size": 10, "rows": [{"ticker": "NEW"}]}}
+        assert (await get_json(client, "/api/scan"))["rows"] == [{"ticker": "NEW"}]
+        await ws.close()

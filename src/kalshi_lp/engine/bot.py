@@ -57,6 +57,7 @@ from kalshi_lp.strategy.rewards import (
     competition,
     expected_daily_reward,
 )
+from kalshi_lp.strategy.scanner import MarketScanner
 from kalshi_lp.strategy.selection import Candidate, MarketSelector
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ log = logging.getLogger(__name__)
 TRANSIENT_ERRORS = (KalshiError, httpx.HTTPError)
 RESIZE_STEP = Decimal("0.2")  # auto sizing: grow a market's size only by 20% or more
 FLATTEN_WARN_SECONDS = 300.0  # "can't flatten" is logged at most this often per market
+SCANNER_FIRST_DELAY = 20.0  # seconds after start-up: the first market scan goes first
 
 
 class Feed(Protocol):
@@ -116,6 +118,12 @@ class LiquidityBot:
             max_capital=settings.risk.max_capital,
         )
         self.risk = RiskManager(settings.risk)
+        # Read-only research for the dashboard: never changes what the bot trades.
+        self.scanner = (
+            MarketScanner(client, self.selector, settings.scanner)
+            if settings.scanner.enabled
+            else None
+        )
         self.tracker = RewardTracker()
         self.executor = OrderExecutor(
             client,
@@ -203,6 +211,8 @@ class LiquidityBot:
                 asyncio.create_task(self._reward_loop(), name="rewards"),
                 asyncio.create_task(self._journal_loop(), name="journal"),
             ]
+            if self.scanner is not None:
+                tasks.append(asyncio.create_task(self._scanner_loop(), name="scanner"))
             for task in tasks:
                 task.add_done_callback(_report_crash)
             await self._quote_loop(max_requotes)
@@ -1015,6 +1025,20 @@ class LiquidityBot:
             self._adopt(scan)
         await self.feed.set_tickers(self.markets)
         self.state.changed.set()
+
+    async def _scanner_loop(self) -> None:
+        """Every rewarded market's $/day at a fixed size, for the dashboard (never traded on)."""
+        assert self.scanner is not None
+        await self._sleep(SCANNER_FIRST_DELAY)
+        while not self.stopping:
+            trading = [t for t in self.markets if t not in self.reduce_only]
+            try:
+                self.journal.write_scan(await self.scanner.scan(trading))
+            except TRANSIENT_ERRORS as exc:
+                log.warning("market scanner failed: %s; retrying next interval", exc)
+            except Exception:
+                log.exception("market scanner crashed; retrying next interval")
+            await self._sleep(self.settings.scanner.interval_seconds)
 
     async def _report_rewards(self) -> None:
         if self.tracker.stats:

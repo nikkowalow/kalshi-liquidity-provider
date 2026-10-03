@@ -221,3 +221,81 @@ def test_loss_cap_doesnt_limit_buying_back_a_short(quoting_cfg, reward) -> None:
     d = quote(cfg, reward, WIDE, position=-10)  # short YES: the YES bid reduces it
     yes = d[Leg.YES].quote
     assert yes is not None and yes.size == D(10)
+
+
+# ------------------------------------------------------- staying inside Target Size
+
+BIG = RewardParams(target_size=D(1000), discount_factor=D("0.5"), reward_per_day=D(50))
+# Like KXGRUBHUBAPP: 101 contracts at 0.46, then a wall of 1271 at 0.45.
+WALL = make_book(yes=[("0.46", 101), ("0.45", 1271), ("0.44", 500)], no=[("0.50", 1200)])
+
+
+def prod_like(quoting_cfg: QuotingConfig) -> QuotingConfig:
+    """Sits a tick back behind a 100-contract cushion, like config/prod.yaml."""
+    return quoting_cfg.model_copy(
+        update={"offset_ticks": 1, "min_cushion": D(100), "share_tolerance": D("0.4")}
+    )
+
+
+def yes_leg(cfg: QuotingConfig, book, **ctx):
+    return QuoteEngine(cfg, MAX_POS).quote(MarketContext(make_market(), book, reward=BIG, **ctx))[
+        Leg.YES
+    ]
+
+
+def test_offset_that_steps_outside_target_size_is_pulled_back_in(quoting_cfg) -> None:
+    # The best reward price is 0.46; a tick back is 0.45, behind 1372 contracts: past the
+    # first 1000 the program counts, so it would earn nothing. Climb back to 0.46.
+    d = yes_leg(prod_like(quoting_cfg), WALL, position=D(0))
+    assert d.quote is not None and d.quote.price == D("0.46")
+    assert "into target" in d.reason and d.score.share > 0
+    no_offset = yes_leg(quoting_cfg.model_copy(update={"min_cushion": D(100)}), WALL, position=D(0))
+    assert no_offset.quote.price == D("0.46") and "into target" not in no_offset.reason
+
+
+def test_leg_is_pulled_when_target_size_is_out_of_reach(quoting_cfg) -> None:
+    # 1200 contracts at the best bid alone fill the 1000 counted: getting in would mean bidding
+    # above the best, with no cushion ahead, which the safety cap forbids. It would earn nothing,
+    # so it isn't quoted.
+    book = make_book(yes=[("0.46", 1200), ("0.45", 100)], no=[("0.50", 300)])
+    d = yes_leg(prod_like(quoting_cfg), book, position=D(0))
+    assert d.quote is None and "outside Target Size" in d.reason
+
+
+def test_resting_order_that_counts_by_queue_priority_is_kept(quoting_cfg) -> None:
+    from kalshi_lp.strategy.rewards import OwnOrder
+
+    # Same wall at the top, but our order was there first: 300 ahead of it, not 1200.
+    book = make_book(yes=[("0.46", 1200), ("0.45", 100)], no=[("0.50", 300)])
+    resting = {Leg.YES: OwnOrder(D("0.46"), D(10), D(300))}
+    d = yes_leg(prod_like(quoting_cfg), book, position=D(0), resting=resting)
+    assert d.quote is not None and d.quote.price == D("0.46")
+    assert "in target" in d.reason and d.score.share > 0
+
+
+def test_resting_order_outside_target_size_moves_in_even_when_young(quoting_cfg) -> None:
+    from kalshi_lp.strategy.rewards import OwnOrder
+
+    cfg = prod_like(quoting_cfg).model_copy(update={"min_quote_life_seconds": 10})
+    d = yes_leg(
+        cfg,
+        WALL,
+        position=D(0),
+        resting={Leg.YES: OwnOrder(D("0.45"), D(10), D(1271))},  # behind the whole wall
+        resting_age={Leg.YES: 2.0},
+    )
+    assert d.quote.price == D("0.46")
+
+
+def test_holding_the_leg_never_climbs_into_target(quoting_cfg) -> None:
+    # Long 10 YES: the skew lowers the YES bid to buy less; don't raise it to earn rewards.
+    d = yes_leg(prod_like(quoting_cfg), WALL, position=D(10))
+    assert d.quote is not None and d.quote.price < D("0.46")
+    assert "into target" not in d.reason
+
+
+def test_thin_book_is_left_alone(quoting_cfg) -> None:
+    # Only 100 contracts on the side: the 1000-contract window doesn't bind anywhere.
+    thin = make_book(yes=[("0.46", 50), ("0.45", 50)], no=[("0.50", 1200)])
+    d = yes_leg(prod_like(quoting_cfg), thin, position=D(0))
+    assert d.quote is not None and "into target" not in d.reason

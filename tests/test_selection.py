@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from kalshi_lp.config import QuotingConfig, SelectionConfig
 from kalshi_lp.core.types import Leg
 from kalshi_lp.exchange.models import IncentiveProgram, Trade
@@ -170,6 +172,22 @@ async def test_earnings_so_far_count_toward_the_payout_minimum() -> None:
     assert c.est_period_payout >= 1
 
 
+async def test_incumbents_only_need_the_payout_minimum() -> None:
+    ex = FakeExchange([make_market("EDGE-1")], {"EDGE-1": BOOK})
+    ex.programs = [program("EDGE-1", 100)]
+    [c] = await selector(ex, mode="incentives").select()
+    payout = c.est_period_payout
+    sel = selector(
+        ex,
+        mode="incentives",
+        fallback_to_volume=False,
+        min_period_payout=payout + 1,  # newcomers need more than it projects...
+        payout_minimum=payout - 1,  # ...but a market we're in only needs the minimum
+    )
+    assert await sel.select() == []
+    assert [c.ticker for c in await sel.select({"EDGE-1": D(0)})] == ["EDGE-1"]
+
+
 async def test_competition_is_neutral_by_default() -> None:
     ex = FakeExchange([make_market("PACKED-1")], {"PACKED-1": BOOK})
     ex.programs = [program("PACKED-1", 100)]
@@ -268,6 +286,46 @@ async def test_truncated_history_is_scaled_to_what_it_covers() -> None:
     assert (now.timestamp() - history.covered_from) < 3600  # not the full 24h
 
 
+async def test_markets_with_any_expected_fills_are_skipped_at_zero(caplog) -> None:
+    tickers = ["SAFE-1", "BUSY-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("SAFE-1", 100), program("BUSY-1", 120)]
+    ex.trades["BUSY-1"] = sweep_trades("BUSY-1", n=1, volume=5000)  # one sweep: still pays
+    caplog.set_level("INFO", logger="kalshi_lp.strategy.selection")
+    assert [c.ticker for c in await selector(ex, mode="incentives").select()] == [
+        "BUSY-1",
+        "SAFE-1",
+    ]
+    picked = await selector(ex, mode="incentives", max_fills_per_day=D(0)).select()
+    assert [c.ticker for c in picked] == ["SAFE-1"]
+    assert "over 0 expected fills/day" in caplog.text
+
+
+def test_fill_caps_need_fill_risk() -> None:
+    with pytest.raises(ValueError, match="max_fills_per_day"):
+        SelectionConfig(fill_risk=False, max_fills_per_day=D(0))
+    with pytest.raises(ValueError, match="max_fill_cost_share"):
+        SelectionConfig(fill_risk=False, max_fill_cost_share=D("0.5"))
+
+
+async def test_markets_whose_fills_eat_too_much_of_the_reward_are_skipped(caplog) -> None:
+    tickers = ["CALM-1", "BUSY-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("CALM-1", 100), program("BUSY-1", 100)]
+    [busy] = [c for c in await selector(ex, mode="incentives").select() if c.ticker == "BUSY-1"]
+    per_fill = busy.quotes[Leg.YES].size * (
+        D("0.07") * busy.quotes[Leg.YES].price * (1 - busy.quotes[Leg.YES].price) + D("0.02")
+    )
+    n = int(busy.est_daily_reward / 2 / per_fill) + 1  # fills eat just over half the reward
+    ex.trades["BUSY-1"] = sweep_trades("BUSY-1", n=n, volume=5000)
+    caplog.set_level("INFO", logger="kalshi_lp.strategy.selection")
+    loose = await selector(ex, mode="incentives", max_fill_cost_share=D("0.6")).select()
+    assert sorted(c.ticker for c in loose) == ["BUSY-1", "CALM-1"]
+    strict = await selector(ex, mode="incentives", max_fill_cost_share=D("0.5")).select()
+    assert [c.ticker for c in strict] == ["CALM-1"]
+    assert "fills would eat over 50% of the rewards" in caplog.text
+
+
 async def test_fill_risk_can_be_turned_off() -> None:
     ex = FakeExchange([make_market("AAA-1")], {"AAA-1": BOOK})
     ex.programs = [program("AAA-1", 100)]
@@ -362,6 +420,16 @@ async def test_recently_selected_market_keeps_its_slot_while_it_qualifies() -> N
     ex.programs = [program("APPROVE-NEW", 200)]  # OLD's program ended: it no longer qualifies
     [c] = await selector(ex, mode="incentives", max_per_series=1).select(held, keep=held)
     assert c.ticker == "APPROVE-NEW"
+
+
+async def test_held_market_is_checked_for_fill_risk_however_it_ranks() -> None:
+    tickers = ["TOP-1", "MID-1", "LOW-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("TOP-1", 300), program("MID-1", 200), program("LOW-1", 100)]
+    sel = selector(ex, mode="incentives", max_markets=1, fill_risk_pool=1)
+    assert [c.ticker for c in await sel.select()] == ["TOP-1"]
+    [kept] = await sel.select({"LOW-1": D(0)}, keep=["LOW-1"])  # outside the checked pool
+    assert kept.ticker == "LOW-1" and kept.fill_risk is not None
 
 
 async def test_default_margin_switches_to_a_meaningfully_better_market() -> None:

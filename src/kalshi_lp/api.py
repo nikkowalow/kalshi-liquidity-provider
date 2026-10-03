@@ -12,6 +12,7 @@ the HTTP endpoints, e.g. ``curl -s localhost:8050/api/markets | jq``:
     GET /api/orders       the snapshot's resting orders
     GET /api/events       recent journal events, oldest first (?type=fill&limit=100)
     GET /api/metrics      totals history, evenly thinned (?points=2000)
+    GET /api/scan         the market scanner: the best markets by $/day at a fixed size
     GET /api/ws           WebSocket, below
     POST /api/control/<action>   pause, resume, flatten, rescan, budget, stop
                                  (see engine.controls; needs the token, below)
@@ -19,10 +20,11 @@ the HTTP endpoints, e.g. ``curl -s localhost:8050/api/markets | jq``:
 WebSocket messages, server to client, JSON:
 
     {"channel": "hello", "run_id": ..., "state": {...}, "events": [...], "metrics": [...],
-     "controls": {"token": ..., "actions": [...]} or null}
+     "scan": {...} or null, "controls": {"token": ..., "actions": [...]} or null}
         first message: the latest snapshot, recent events and the totals history
     {"channel": "events", "data": [...]}   new journal events, in order
     {"channel": "state", "data": {...}}    each new snapshot, about once a second
+    {"channel": "scan", "data": {...}}     each market scanner report (the hello has the last)
 
 The journal files stay the record (they carry history across restarts); this
 module only delivers it. It runs in the bot's event loop but can't hold the bot
@@ -85,6 +87,7 @@ ENDPOINTS = {
     "/api/orders": "the snapshot's resting orders",
     "/api/events": "recent journal events, oldest first (?type=fill&limit=100)",
     "/api/metrics": "totals history, evenly thinned (?points=2000)",
+    "/api/scan": "the market scanner: the best markets by $/day at a fixed size (read-only)",
     "/api/ws": "WebSocket: a hello (state, events, metrics), then events and snapshots live",
     "/api/control/<action>": "POST with the token: pause, resume, flatten, rescan, budget, stop",
 }
@@ -117,6 +120,7 @@ class _Client:
         self.ws = ws
         self.events: list[str] = []
         self.state: str | None = None  # only the newest snapshot matters
+        self.scan: str | None = None  # likewise the newest scanner report
         self.stuck = False
         self.wake = asyncio.Event()
         self.sender: asyncio.Task[None] | None = None
@@ -124,6 +128,8 @@ class _Client:
     def push(self, channel: str, text: str) -> None:
         if channel == "state":
             self.state = text
+        elif channel == "scan":
+            self.scan = text
         elif len(self.events) < MAX_PENDING:
             self.events.append(text)
         else:
@@ -139,6 +145,9 @@ class _Client:
         if self.state is not None:
             frames.append('{"channel":"state","data":' + self.state + "}")
             self.state = None
+        if self.scan is not None:
+            frames.append('{"channel":"scan","data":' + self.scan + "}")
+            self.scan = None
         return frames
 
 
@@ -188,6 +197,9 @@ class DashboardApi:
         self.state: str | None = None
         with contextlib.suppress(OSError):
             self.state = (journal.dir / "state.json").read_text() or None
+        self.scan: str | None = None  # the market scanner's last report (survives restarts)
+        with contextlib.suppress(OSError):
+            self.scan = (journal.dir / "scan.json").read_text() or None
         self._clients: set[_Client] = set()
         self._closing = False
         self._loop_thread: int | None = None
@@ -266,6 +278,8 @@ class DashboardApi:
             return
         if channel == "state":
             self.state = text
+        elif channel == "scan":
+            self.scan = text
         else:
             try:
                 self.recent.add(text)
@@ -285,6 +299,7 @@ class DashboardApi:
         app.router.add_get("/api/orders", self._orders)
         app.router.add_get("/api/events", self._events)
         app.router.add_get("/api/metrics", self._metrics)
+        app.router.add_get("/api/scan", self._scan)
         app.router.add_get("/api/ws", self._ws)
         app.router.add_post("/api/control/{action}", self._control)
         app.router.add_get("/api/{rest:.*}", self._not_found)
@@ -337,6 +352,9 @@ class DashboardApi:
         lines = self.recent.lines(request.query.get("type"), limit)
         return web.Response(text="[" + ",".join(lines) + "]", content_type="application/json")
 
+    async def _scan(self, _: web.Request) -> web.Response:
+        return web.Response(text=self.scan or "null", content_type="application/json")
+
     async def _metrics(self, request: web.Request) -> web.Response:
         points = _int_param(request, "points", DEFAULT_POINTS, 2, MAX_POINTS)
         lines = await asyncio.to_thread(_metric_lines, self.journal.dir / "metrics.jsonl", points)
@@ -379,7 +397,7 @@ class DashboardApi:
         await ws.prepare(request)
         client = _Client(ws)
         # Taken in the same instant the client starts collecting: nothing missed or sent twice.
-        events, state = self.recent.lines(), self.state
+        events, state, scan = self.recent.lines(), self.state, self.scan
         self._clients.add(client)
         try:
             metrics = await asyncio.to_thread(
@@ -394,7 +412,9 @@ class DashboardApi:
                 + ",".join(events)
                 + '],"metrics":['
                 + ",".join(metrics)
-                + '],"controls":'
+                + '],"scan":'
+                + (scan or "null")
+                + ',"controls":'
                 + json.dumps(self._controls_info())
                 + "}"
             )

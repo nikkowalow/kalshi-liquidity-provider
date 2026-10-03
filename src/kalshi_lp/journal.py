@@ -8,6 +8,7 @@ or config change) continues one history instead of starting a new one:
         events.jsonl   append-only: orders, fills, quote changes, selections, logs
         metrics.jsonl  append-only: the totals every 10 seconds (the dashboard charts)
         state.json     latest full snapshot, rewritten about once a second
+        scan.json      the market scanner's latest report (every rewarded market's $/day)
 
 ``state.json`` also carries the reward ledger (per-market estimated earnings)
 and counters; a restarted bot reads them back and carries on from there.
@@ -34,7 +35,8 @@ from typing import Any, TextIO
 
 log = logging.getLogger(__name__)
 
-# Live listener: called with ("event", <JSON line>) or ("state", <JSON snapshot>).
+# Live listener: called with ("event", <JSON line>), ("state", <JSON snapshot>) or
+# ("scan", <JSON scanner report>).
 Subscriber = Callable[[str, str], None]
 
 # Per-run directories written by older versions: 20260929-212257-prod-live
@@ -109,6 +111,15 @@ class RunJournal:
         for subscriber in self.subscribers:
             subscriber("state", text)
 
+    def write_scan(self, report: dict[str, Any]) -> None:
+        """The market scanner's latest report (``scan.json``, replaced each scan)."""
+        text = json.dumps(report, default=_default)
+        tmp = self.dir / "scan.tmp"
+        tmp.write_text(text)
+        os.replace(tmp, self.dir / "scan.json")
+        for subscriber in self.subscribers:
+            subscriber("scan", text)
+
     def close(self) -> None:
         for f in (self._events, self._metrics):
             if f is not None:
@@ -127,6 +138,9 @@ class NullJournal(RunJournal):
         self.subscribers = []
 
     def write_state(self, state: dict[str, Any]) -> None:
+        pass
+
+    def write_scan(self, report: dict[str, Any]) -> None:
         pass
 
 

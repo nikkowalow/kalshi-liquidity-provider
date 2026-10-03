@@ -12,6 +12,7 @@ import type {
   RunStartEvent,
   RunState,
   Sample,
+  ScanReport,
   ServerMessage,
 } from '../types'
 
@@ -128,6 +129,8 @@ export function useJournal() {
   const [live, setLive] = useState<Sample[]>([])
   const [link, setLink] = useState<Link>('connecting')
   const [controls, setControls] = useState<ControlInfo | null>(null)
+  // The market scanner's latest report (every few minutes; research only, never traded on).
+  const [scan, setScan] = useState<ScanReport | null>(null)
 
   useEffect(() => {
     let socket: WebSocket | null = null
@@ -163,6 +166,7 @@ export function useJournal() {
           attempt = 0
           setRunId(msg.run_id)
           setControls(msg.controls ?? null) // a new token every time the bot starts
+          setScan(msg.scan ?? null)
           setJournal(ingest({ ...emptyJournal(), metrics: msg.metrics }, msg.events))
           if (msg.state) {
             const first = msg.state
@@ -178,6 +182,9 @@ export function useJournal() {
         case 'state':
           snapshot = msg.data
           schedule()
+          break
+        case 'scan':
+          setScan(msg.data)
           break
       }
     }
@@ -204,5 +211,5 @@ export function useJournal() {
     }
   }, [])
 
-  return { runId, state, journal, live, link, controls }
+  return { runId, state, journal, live, link, controls, scan }
 }

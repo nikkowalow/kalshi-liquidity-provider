@@ -34,6 +34,7 @@ from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.pricing import PriceGrid
 from kalshi_lp.core.types import ONE, ZERO, Leg, Quote
 from kalshi_lp.exchange.models import Market
+from kalshi_lp.strategy.fill_risk import depth_ahead
 from kalshi_lp.strategy.rewards import (
     OwnOrder,
     RewardParams,
@@ -178,16 +179,81 @@ class QuoteEngine:
         if price < self.cfg.min_price or not grid.is_valid(price):
             return LegDecision(leg, None, f"price {price} below floor")
 
+        queue_spot: Decimal | None = None  # a resting order's real place in its level, if kept
+        if inventory <= 0:  # holding this leg: never raise its bid to buy more
+            moved = self._into_target(ctx, leg, grid, price, cap, size)
+            current = ctx.resting.get(leg)
+            if moved is None:
+                # No new order gets in, but a resting one may still count thanks to its queue
+                # spot (those who joined its level later are behind it): keep that one.
+                if current is None or not self._counts(ctx, leg, grid, current, cap, size):
+                    return LegDecision(leg, None, "outside Target Size, even at the safety cap")
+                price, queue_spot, how = current.price, current.ahead, how + "(kept: in target)"
+            elif moved != price:
+                price, how = moved, how + "+into target"
+
         size = self._loss_capped(size, price, inventory)
         if size <= 0:
             return LegDecision(leg, None, "loss cap")
 
-        score = score_side(ctx.book.bids(leg), price, size, ctx.reward, grid)
+        score = score_side(ctx.book.bids(leg), price, size, ctx.reward, grid, queue_spot)
         kept = self._keep_resting(ctx, leg, grid, price, cap, size, score)
         if kept is not None:
             price, score, how = kept[0], kept[1], how + "(kept)"
         quote = Quote(ctx.market.ticker, leg.order_side, leg.to_yes_price(price), size)
         return LegDecision(leg, quote, how, score, price)
+
+    def _into_target(
+        self,
+        ctx: MarketContext,
+        leg: Leg,
+        grid: PriceGrid,
+        price: Decimal,
+        cap: Decimal,
+        size: Decimal,
+    ) -> Decimal | None:
+        """``price``, or the lowest price up to ``cap`` that puts the order inside Target Size.
+
+        The program only counts the first Target Size contracts on a side, from
+        the best bid down. A new order joins the back of its price level, so it
+        counts only if fewer than Target Size rest at its price or better.
+        ``offset_ticks`` or skew can step it just past that edge, where it
+        earns nothing yet still carries fill risk. If so, climb the fewest
+        ticks that get the whole order inside (or failing that, part of it),
+        never above ``cap`` (cushion, edge from mid, no crossing). None if no
+        price up to the cap gets in: the leg isn't worth quoting.
+        """
+        target = ctx.reward.target_size
+        bids = ctx.book.bids(leg)
+        if depth_ahead(bids, price) < target:
+            return price  # inside already (or the book is too thin for the window to bind)
+        partial: Decimal | None = None
+        candidate = price
+        for _ in range(_MAX_PRICES_SEARCHED):
+            if candidate >= cap:
+                break
+            candidate = grid.tick_above(candidate)
+            ahead = depth_ahead(bids, candidate)
+            if ahead + size <= target:
+                return candidate
+            if partial is None and ahead < target:
+                partial = candidate
+        return partial
+
+    def _counts(
+        self,
+        ctx: MarketContext,
+        leg: Leg,
+        grid: PriceGrid,
+        order: OwnOrder,
+        cap: Decimal,
+        size: Decimal,
+    ) -> bool:
+        """Whether a resting order is safe to keep and counts toward Target Size where it is."""
+        if not (self.cfg.min_price <= order.price <= cap) or not grid.is_valid(order.price):
+            return False
+        score = score_side(ctx.book.bids(leg), order.price, size, ctx.reward, grid, order.ahead)
+        return score.share > 0
 
     def _loss_capped(self, size: Decimal, price: Decimal, inventory: Decimal) -> Decimal:
         """Shrink ``size`` so a fill can lose at most ``max_loss_per_fill``.
@@ -239,6 +305,8 @@ class QuoteEngine:
         if not (self.cfg.min_price <= current.price <= cap) or not grid.is_valid(current.price):
             return None  # unsafe: move now
         kept = score_side(ctx.book.bids(leg), current.price, size, ctx.reward, grid, current.ahead)
+        if kept.meets_target and kept.share <= 0 < score.share:
+            return None  # outside Target Size where it rests, so it earns nothing: move in now
         age = ctx.resting_age.get(leg)
         young = age is not None and age < self.cfg.min_quote_life_seconds
         holding = leg.inventory(ctx.position) > 0

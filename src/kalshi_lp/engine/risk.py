@@ -184,12 +184,15 @@ class RiskManager:
         """Recompute risk. ``live_positions`` (instant, from fills) drive the fill-burst breaker."""
         now = self._clock()
         session_pnl = ZERO
-        for ticker in tickers:
+        # Markets traded earlier this session keep counting after they leave the selection
+        # (switched out, settled): otherwise their losses vanish from the session total.
+        for ticker in tickers | self._baseline.keys():
             pos = positions.get(ticker, Position.flat(ticker))
-            live = live_positions.get(ticker, pos.position) if live_positions else pos.position
-            self._track_fills(ticker, live, now)
+            if ticker in tickers:
+                live = live_positions.get(ticker, pos.position) if live_positions else pos.position
+                self._track_fills(ticker, live, now)
             mark = marks.get(ticker)
-            if mark is None and ticker in self._last_pnl:
+            if mark is None and ticker in self._last_pnl and pos.position != 0:
                 pass  # book unavailable (blind): keep the last valuation rather than cost
             elif ticker in positions:
                 self._last_pnl[ticker] = position_pnl(pos, mark)

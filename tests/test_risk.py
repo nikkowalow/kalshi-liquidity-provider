@@ -35,6 +35,20 @@ def test_session_loss_halts(risk_cfg: RiskConfig) -> None:
     assert view.halted and risk.halted
 
 
+def test_losses_still_count_after_a_market_leaves_the_selection(risk_cfg: RiskConfig) -> None:
+    risk = RiskManager(risk_cfg, Clock())
+    held = make_position(position=22, exposure="19.58")  # 22 YES at 0.89
+    risk.update({T}, {T: make_position()}, {T: D("0.89")}, D(1000))
+    view = risk.update({T}, {T: held}, {T: (None, D("0.95"))}, D(1000))  # nobody bids
+    assert view.session_pnl == D("-19.58")
+    # The market settles NO and drops out of the selection: the loss stays.
+    settled = make_position(realized="-19.58")
+    view = risk.update({"OTHER-1"}, {T: settled}, {}, D(1000))
+    assert view.session_pnl == D("-19.58")
+    view = risk.update({"OTHER-1"}, {}, {}, D(1000))  # and once Kalshi stops listing it
+    assert view.session_pnl == D("-19.58")
+
+
 def test_fill_burst_pauses_market(risk_cfg: RiskConfig) -> None:
     clock = Clock()
     risk = RiskManager(risk_cfg, clock)

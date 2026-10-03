@@ -125,6 +125,47 @@ export interface ControlInfo {
   actions: string[]
 }
 
+/** One market in the scanner's report (src/kalshi_lp/strategy/scanner.py). */
+export interface ScanRow {
+  rank: number // by est_daily, 1 = best
+  ticker: string
+  title: string
+  close_time: string | null
+  program_per_day: number
+  target_size: number
+  bid: Num // live YES book
+  ask: Num
+  spread: Num
+  yes_price: Num // where the scan's YES bid would rest (leg terms)
+  no_price: Num // and its NO bid
+  yes_share: Num
+  no_share: Num
+  est_daily: number // estimated reward, $/day, at `size` contracts per side
+  est_hourly: number
+  capital: number // cash those quotes lock
+  return_daily: Num // est_daily / capital
+  days_left: number // until the program period ends or the market closes
+  period_payout: number // est_daily x days_left
+  competition: 'low' | 'medium' | 'high'
+  competition_room?: Num
+  fills_per_day: Num // null: trades not checked
+  fill_cost_per_day: Num
+  net_daily: Num
+  trading: boolean // the bot quotes it now
+  skip: string | null // why the bot's filters would pass on it
+}
+
+export interface ScanReport {
+  scanned_at: number
+  seconds: number // how long the scan took
+  size: number // contracts per side every estimate assumes
+  interval: number // seconds between scans
+  programs: number
+  markets: number // rewarded markets scanned
+  earning: number // of those, how many earn anything at this size
+  rows: ScanRow[] // the best, by est_daily
+}
+
 /** Messages from the bot's WebSocket (/api/ws; see src/kalshi_lp/api.py). */
 export type ServerMessage =
   | {
@@ -133,10 +174,12 @@ export type ServerMessage =
       state: RunState | null
       events: JournalEvent[]
       metrics: MetricsEvent[]
+      scan?: ScanReport | null
       controls?: ControlInfo | null
     }
   | { channel: 'events'; data: JournalEvent[] }
   | { channel: 'state'; data: RunState }
+  | { channel: 'scan'; data: ScanReport }
 
 interface Base {
   ts: number

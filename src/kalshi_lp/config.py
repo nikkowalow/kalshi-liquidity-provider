@@ -154,6 +154,26 @@ class SelectionConfig(_Section):
     min_net_daily_reward: Decimal = Field(
         Decimal("0"), description="Drop markets whose reward minus fill cost is at or below this."
     )
+    max_fills_per_day: Decimal | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Drop markets whose replayed trades would fill more of our contracts per day than "
+            "this (0: only markets no sweep would have reached). Markets whose trade history "
+            "can't be fetched are dropped too, since their fill risk is unknown. Needs "
+            "fill_risk. None disables."
+        ),
+    )
+    max_fill_cost_share: Decimal | None = Field(
+        None,
+        gt=0,
+        description=(
+            "Drop markets whose expected fill cost is more than this share of their estimated "
+            "reward (0.35: fills may eat at most 35%). A safety margin on top of "
+            "min_net_daily_reward, which only drops markets where fills eat it all. Needs "
+            "fill_risk. None disables."
+        ),
+    )
     catalog_refresh_seconds: float = Field(
         600,
         ge=0,
@@ -198,12 +218,21 @@ class SelectionConfig(_Section):
         ge=0,
         description=(
             "Skip markets whose projected payout over the program's remaining period is below "
-            "this. Kalshi pays nothing under $1, so spreading thin can earn $0."
+            "this. Kalshi pays nothing under $1, so spreading thin can earn $0. Markets we "
+            "already have a stake in only need payout_minimum (if lower), so a market near "
+            "the line isn't dropped and re-picked as its estimate wobbles."
         ),
     )
     candidate_pool: int = Field(
         25_000, ge=1, description="Max open markets scanned in volume mode (1,000 per read)."
     )
+
+    @model_validator(mode="after")
+    def _check_fill_filter(self) -> SelectionConfig:
+        for name in ("max_fills_per_day", "max_fill_cost_share"):
+            if getattr(self, name) is not None and not self.fill_risk:
+                raise ValueError(f"selection.{name} needs selection.fill_risk: true")
+        return self
 
 
 class QuotingConfig(_Section):
@@ -357,6 +386,27 @@ class LoggingConfig(_Section):
     json_format: bool = False
 
 
+class ScannerConfig(_Section):
+    """The dashboard's market scanner: read-only research, never traded on."""
+
+    enabled: bool = Field(
+        True, description="Estimate every rewarded market's $/day for the dashboard."
+    )
+    interval_seconds: float = Field(300, ge=30, description="How often to rescan.")
+    size: Decimal = Field(
+        Decimal("10"), gt=0, description="Contracts per side every estimate assumes."
+    )
+    top: int = Field(100, ge=1, le=1000, description="How many of the best markets to report.")
+    fill_risk: bool = Field(
+        True, description="Replay the top markets' recent trades for expected fill cost."
+    )
+    pace_seconds: float = Field(
+        0.1,
+        ge=0,
+        description="Pause between trade-history requests, leaving the rate limit to trading.",
+    )
+
+
 class ApiConfig(_Section):
     enabled: bool = Field(
         True, description="Serve the dashboard and its API (HTTP + WebSocket) while the bot runs."
@@ -396,6 +446,7 @@ class Settings(_Section):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    scanner: ScannerConfig = Field(default_factory=ScannerConfig)
 
     @property
     def api_url(self) -> str:

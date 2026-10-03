@@ -275,8 +275,14 @@ bot can move. For the best `fill_risk_pool` candidates, the bot replays the last
 prints within `sweep_window_seconds` into sweeps, and counts how much of each sweep would get past
 the depth ahead of us. Each such fill costs the taker fee to exit plus `adverse_move`. Markets are
 then ranked by **net $/day** (estimated reward minus that cost), and any at or below
-`min_net_daily_reward` are dropped. `klp markets` and the dashboard show the fills/day and net
-figures.
+`min_net_daily_reward` are dropped. `max_fill_cost_share` adds a safety margin: drop markets whose
+fills would eat more than that share of the reward (0.35 = 35%). `max_fills_per_day` caps the
+replayed fills outright. `klp markets` and the dashboard show the fills/day and net figures.
+Markets the bot already holds are always checked, however they rank.
+
+The replay only sees sweeps in the trade history. Thin markets on a published number (gas
+prices, CPI, rainfall, view counts) can show no risk at all and still jump on the release, so
+those series go in `exclude_series`.
 
 **Best $/h, continuously.** The bot rescans every `reselect_interval_seconds` without pausing its
 quoting (the program and market list is reused for `catalog_refresh_seconds`; order books and
@@ -286,10 +292,13 @@ until `max_capital` is used. Spreading the budget over more markets would only a
 ones. Each leg is charged the cash it really locks: with `max_loss_per_fill`, an expensive leg
 rests only a few contracts (at most $3 of them with a $3 cap), so a market costs far less than
 size x $1 a pair, and the budget funds that many more markets. A better market takes a slot once
-it pays `incumbent_bonus` (10%) more; smaller gaps are estimate noise. A newly picked market also
-keeps its slot for `min_hold_seconds` (15 min) unless it stops passing the filters or gets
-paused, so markets don't flip in and out as estimates wobble. With `protect_unpaid`, a market
-holding unpaid earnings below Kalshi's $1 minimum counts what leaving would forfeit. Sizes only
+it pays `incumbent_bonus` more; smaller gaps are estimate noise. A newly picked market also
+keeps its slot for `min_hold_seconds` unless it stops passing the filters or gets paused, so
+markets don't flip in and out as estimates wobble. A new market must project
+`min_period_payout` by its period end, but one the bot already has a stake in only needs
+`payout_minimum`, so a market near the line isn't dropped and re-picked scan after scan. With
+`protect_unpaid`, a market holding unpaid earnings below Kalshi's $1 minimum counts what leaving
+would forfeit. Sizes only
 grow in steps of 20% or more, so book jitter doesn't resize orders back and forth.
 
 ## Quoting

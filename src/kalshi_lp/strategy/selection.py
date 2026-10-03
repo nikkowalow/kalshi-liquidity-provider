@@ -116,7 +116,7 @@ class Candidate:
 
 
 @dataclass(frozen=True, slots=True)
-class _Catalog:
+class Catalog:
     """Programs and their markets: slow-changing, so reused between scans."""
 
     rewards: dict[str, RewardParams]
@@ -147,7 +147,7 @@ class MarketSelector:
         self.quoting = quoting
         self.engine = engine
         self.max_capital = max_capital  # risk.max_capital: with auto_size, sets how many markets
-        self._catalog: _Catalog | None = None
+        self._catalog: Catalog | None = None
         self._incumbents: dict[str, Decimal] = {}
         self._exclude: set[str] = set()
         self._trades: dict[str, _TradeHistory] = {}
@@ -258,7 +258,7 @@ class MarketSelector:
         capital, as long as they still pass the filters."""
         self._incumbents = dict(incumbents or {})
         self._exclude = set(exclude)
-        catalog = await self._current_catalog()
+        catalog = await self.catalog()
         rewards = catalog.rewards
 
         if self.cfg.mode == "tickers":
@@ -269,10 +269,12 @@ class MarketSelector:
         if self.cfg.mode == "incentives" and rewards:
             ranked = await self._rank(catalog.markets, rewards, by_reward=True, limit=None)
             worth_it = self._explain_and_filter(ranked)
-            if self.cfg.fill_risk and worth_it:
-                worth_it = await self._apply_fill_risk(worth_it)
             held = set(keep)
             worth_it.sort(key=lambda c: c.ticker not in held)  # stable: rank order otherwise
+            if self.cfg.fill_risk and worth_it:
+                # Held markets go first so they're always checked, however they rank.
+                worth_it = await self._apply_fill_risk(worth_it)
+                worth_it.sort(key=lambda c: c.ticker not in held)
             if worth_it or not self.cfg.fallback_to_volume:
                 return self._fit_capital(self._diversify(worth_it, self.cfg.max_markets))
             log.warning("no incentive market passed filters; falling back to volume ranking")
@@ -347,6 +349,8 @@ class MarketSelector:
         self._trades = {t: h for t, h in self._trades.items() if h.fetched_at >= stale}
         kept: list[Candidate] = []
         dropped: list[Candidate] = []
+        too_busy: list[Candidate] = []
+        too_costly: list[Candidate] = []
         checked = 0
         for c in ranked:
             enough = len(self._diversify(kept, cfg.max_markets)) >= cfg.max_markets
@@ -354,8 +358,12 @@ class MarketSelector:
                 break
             checked += 1
             try:
-                trades, hours = await self._recent_trades(c.ticker, now)
+                trades, hours = await self.recent_trades(c.ticker, now)
             except (KalshiError, httpx.HTTPError) as exc:
+                if cfg.max_fills_per_day is not None:
+                    log.warning("no trade history for %s (%s); skipping it", c.ticker, exc)
+                    too_busy.append(c)
+                    continue
                 log.warning(
                     "no trade history for %s (%s); ranking it without fill risk", c.ticker, exc
                 )
@@ -371,7 +379,17 @@ class MarketSelector:
             )
             c = replace(c, fill_risk=risk)
             c = replace(c, rank_score=c.value * c.rank_multiplier)
-            (dropped if c.net_daily_reward <= cfg.min_net_daily_reward else kept).append(c)
+            if cfg.max_fills_per_day is not None and risk.fills_per_day > cfg.max_fills_per_day:
+                too_busy.append(c)
+            elif (
+                cfg.max_fill_cost_share is not None
+                and c.fill_cost_per_day > c.est_daily_reward * cfg.max_fill_cost_share
+            ):
+                too_costly.append(c)
+            elif c.net_daily_reward <= cfg.min_net_daily_reward:
+                dropped.append(c)
+            else:
+                kept.append(c)
         kept.sort(key=lambda c: c.rank_score, reverse=True)
         log.info(
             "%d of %d checked markets still pay after expected fill costs "
@@ -382,8 +400,24 @@ class MarketSelector:
         )
         if dropped:
             log.info("  skipped %4d: fills would cost more than the rewards", len(dropped))
+        if too_busy:
+            log.info(
+                "  skipped %4d: over %s expected fills/day (or no trade history)",
+                len(too_busy),
+                cfg.max_fills_per_day,
+            )
+        if too_costly:
+            log.info(
+                "  skipped %4d: fills would eat over %s%% of the rewards",
+                len(too_costly),
+                f"{(cfg.max_fill_cost_share * 100).normalize():f}",
+            )
         risky = sorted(
-            (c for c in (*kept, *dropped) if c.fill_risk and c.fill_risk.fills_per_day > 0),
+            (
+                c
+                for c in (*kept, *dropped, *too_busy, *too_costly)
+                if c.fill_risk and c.fill_risk.fills_per_day > 0
+            ),
             key=lambda c: c.fill_cost_per_day,
             reverse=True,
         )
@@ -437,7 +471,7 @@ class MarketSelector:
                 continue
             fraction = budget / need
             partial = c.earned + c.est_daily_reward * fraction * c.earning_days_left
-            if budget > 0 and partial >= self.cfg.min_period_payout:
+            if budget > 0 and partial >= self._payout_bar(c):
                 chosen.append(c)
             break
         if len(chosen) < len(ranked):
@@ -451,7 +485,7 @@ class MarketSelector:
             )
         return chosen
 
-    async def _current_catalog(self) -> _Catalog:
+    async def catalog(self) -> Catalog:
         """Programs and (in incentives mode) their markets, refreshed every
         catalog_refresh_seconds; order books are fetched fresh by every scan."""
         now = time.time()
@@ -466,10 +500,15 @@ class MarketSelector:
             else []
         )
         log.info("active liquidity programs: %d across %d markets", len(programs), len(rewards))
-        self._catalog = _Catalog(rewards, markets, len(programs), now)
+        self._catalog = Catalog(rewards, markets, len(programs), now)
         return self._catalog
 
-    async def _recent_trades(self, ticker: str, now: float) -> tuple[list[Trade], float]:
+    def keep_trades_for(self, tickers: Iterable[str]) -> None:
+        """Drop cached trade history for every market not in ``tickers``."""
+        keep = set(tickers)
+        self._trades = {t: h for t, h in self._trades.items() if t in keep}
+
+    async def recent_trades(self, ticker: str, now: float) -> tuple[list[Trade], float]:
         """The last ``trade_lookback_hours`` of trades (cached, fetched incrementally),
         and how many hours of history they actually cover."""
         cfg = self.cfg
@@ -506,7 +545,7 @@ class MarketSelector:
                 reason = "earns nothing at our size/price (thin book, deep queue, or no cushion)"
             elif c.est_daily_reward < self.cfg.min_daily_reward:
                 reason = f"under ${self.cfg.min_daily_reward}/day"
-            elif c.est_period_payout < self.cfg.min_period_payout:
+            elif c.est_period_payout < self._payout_bar(c):
                 reason = f"under ${self.cfg.min_period_payout} before the period ends/market closes"
             else:
                 kept.append(c)
@@ -528,6 +567,12 @@ class MarketSelector:
                 c.est_period_payout,
             )
         return kept
+
+    def _payout_bar(self, c: Candidate) -> Decimal:
+        """Projected payout ``c`` needs: newcomers min_period_payout, incumbents the minimum."""
+        if c.ticker in self._incumbents:
+            return min(self.cfg.min_period_payout, self.cfg.payout_minimum)
+        return self.cfg.min_period_payout
 
     def _diversify(self, ranked: Sequence[_T], limit: int) -> list[_T]:
         """Take the best-ranked items, at most ``max_per_series`` per series."""

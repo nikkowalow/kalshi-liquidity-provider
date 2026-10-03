@@ -6,6 +6,7 @@ import { HelpLayer } from './components/HelpLayer'
 import { Kpis } from './components/Kpis'
 import { MarketsTable } from './components/MarketsTable'
 import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/SidePanels'
+import { Scanner } from './components/Scanner'
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
 import { useEffect, useMemo } from 'react'
@@ -68,6 +69,7 @@ export default function App() {
         <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} />
         <Charts journal={journal} state={state} live={live} />
         <EarningsMix state={state} />
+        <Scanner scan={raw.scan} />
         <Blotter orders={journal.orders} fills={journal.fills} quotes={journal.quotes} />
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />
         <LogPanel logs={journal.logs} />
