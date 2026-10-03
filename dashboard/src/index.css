@@ -279,3 +279,30 @@ tr.earning > td:first-child { border-left: 2px solid var(--green); }
   .cursor { animation: none; }
   .mix-bar { transition: none; }
 }
+
+/* market detail popup (click a row in Markets) */
+tr.clickable { cursor: pointer; }
+.md-backdrop { position: fixed; inset: 0; z-index: 40; background: rgb(0 0 0 / 0.65); display: flex;
+               align-items: flex-start; justify-content: center; padding: 3vh 16px; overflow: auto; }
+.md { width: min(1180px, 100%); background: var(--panel); border: 1px solid var(--accent); }
+.md-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+           background: var(--tint-1); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.md-head .ticker { font-size: 14px; font-weight: 700; }
+.md-title { color: var(--text); margin: 0 8px; }
+.md-actions { display: flex; gap: 10px; align-items: center; }
+.md-grid { display: grid; gap: 6px; padding: 6px; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); }
+.md-card { border: 1px solid var(--line); background: var(--bg); min-width: 0; overflow: auto; }
+.md-card.wide { grid-column: 1 / -1; max-height: 260px; }
+.md-card h3 { margin: 0; padding: 2px 6px; font-size: 11px; color: var(--accent); background: var(--tint-1);
+              text-transform: uppercase; position: sticky; top: 0; z-index: 2; }
+.md-card h4 { margin: 6px 6px 2px; font-size: 10px; color: var(--muted); text-transform: uppercase; }
+.md-field { display: flex; justify-content: space-between; gap: 8px; padding: 1px 6px; }
+.md-field + .md-field { border-top: 1px solid var(--grid); }
+.md-label { color: var(--muted); }
+.md-sub { color: var(--muted); padding: 2px 6px; }
+.md-progress { position: relative; margin: 6px; height: 16px; border: 1px solid var(--line); background: var(--panel); }
+.md-progress-fill { position: absolute; inset: 0 auto 0 0; background: var(--tint-3); }
+.md-progress-fill.done { background: color-mix(in oklch, var(--green) 35%, transparent); }
+.md-progress span { position: relative; padding: 0 6px; font-size: 10px; line-height: 14px; }
+.md-ladder td.md-mine { font-weight: 700; background: var(--tint-2); }
+.md-why { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -296,9 +296,11 @@ it pays `incumbent_bonus` more; smaller gaps are estimate noise. A newly picked 
 keeps its slot for `min_hold_seconds` unless it stops passing the filters or gets paused, so
 markets don't flip in and out as estimates wobble. A new market must project
 `min_period_payout` by its period end, but one the bot already has a stake in only needs
-`payout_minimum`, so a market near the line isn't dropped and re-picked scan after scan. With
-`protect_unpaid`, a market holding unpaid earnings below Kalshi's $1 minimum counts what leaving
-would forfeit. Sizes only
+`payout_minimum`, so a market near the line isn't dropped and re-picked scan after scan.
+Programs run in periods (usually a day) and Kalshi's $1 minimum applies to each one, so only
+earnings in the period still running count toward these, or as a stake. With `protect_unpaid`, a
+market holding unpaid earnings below the minimum in its current period counts what leaving would
+forfeit. Sizes only
 grow in steps of 20% or more, so book jitter doesn't resize orders back and forth.
 
 ## Quoting

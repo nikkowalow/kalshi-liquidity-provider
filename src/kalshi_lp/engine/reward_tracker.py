@@ -25,6 +25,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -52,6 +53,15 @@ class MarketRewardStats:
     recent: deque[tuple[float, Decimal]] = field(default_factory=deque)  # (time, earned)
     title: str = ""
     last_earned_at: float | None = None  # wall-clock time we last earned here
+    # Earned per program period, by its end (ISO time). Kalshi pays each period on its own.
+    periods: dict[str, Decimal] = field(default_factory=dict)
+
+    def open_period_earned(self, now: float) -> Decimal:
+        """Earned in program periods still running (Kalshi's $1 minimum applies per period)."""
+        return sum(
+            (e for end, e in self.periods.items() if datetime.fromisoformat(end).timestamp() > now),
+            ZERO,
+        )
 
     @property
     def avg_score(self) -> Decimal:
@@ -122,6 +132,9 @@ class RewardTracker:
             stats.scored += 1
         stats.score_sum += score
         stats.earned += earned
+        if params.period_end is not None and earned > 0:
+            key = params.period_end.isoformat()
+            stats.periods[key] = stats.periods.get(key, ZERO) + earned
         stats.recent.append((self._clock(), earned))
         if earned > 0:
             stats.last_earned_at = time.time()
@@ -138,6 +151,8 @@ class RewardTracker:
             stats.earned += Decimal(str(d.get("earned") or 0))
             stats.title = stats.title or str(d.get("title") or "")
             stats.last_earned_at = stats.last_earned_at or d.get("last_at")
+            for end, earned in (d.get("periods") or {}).items():
+                stats.periods[end] = stats.periods.get(end, ZERO) + Decimal(str(earned))
         self._carried = self.total_earned
 
     def ledger(self, titles: Mapping[str, str] | None = None) -> dict[str, dict[str, Any]]:
@@ -151,6 +166,7 @@ class RewardTracker:
                 "scored": s.scored,
                 "score_sum": s.score_sum,
                 "last_at": s.last_earned_at,
+                "periods": s.periods,
             }
             for ticker, s in self.stats.items()
         }
@@ -170,6 +186,19 @@ class RewardTracker:
             return ZERO
         score = score_market(book, orders, queue_ahead, params, grid, in_book=in_book)
         return self.record(ticker, score, params)
+
+    def ended_periods(self, now: float) -> dict[str, Decimal]:
+        """Estimated earnings of program periods that are over, by "ticker|period end".
+
+        Earnings from before periods were tracked are left out: lumped over several
+        periods, they can't tell which of them reached Kalshi's minimum.
+        """
+        return {
+            f"{ticker}|{end}": earned
+            for ticker, s in self.stats.items()
+            for end, earned in s.periods.items()
+            if datetime.fromisoformat(end).timestamp() <= now
+        }
 
     @property
     def total_earned(self) -> Decimal:

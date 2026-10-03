@@ -176,6 +176,8 @@ class MarketSelector:
                 full_credit_fraction=self.quoting.full_credit_fraction,
                 reward_per_day=sum((p.reward_per_day for p in progs), ZERO),
                 period_end=main.end,
+                period_start=main.start,
+                period_reward=sum((p.period_reward for p in progs), ZERO),
             )
         return params
 
@@ -406,11 +408,11 @@ class MarketSelector:
                 len(too_busy),
                 cfg.max_fills_per_day,
             )
-        if too_costly:
+        if too_costly and cfg.max_fill_cost_share is not None:
             log.info(
                 "  skipped %4d: fills would eat over %s%% of the rewards",
                 len(too_costly),
-                f"{(cfg.max_fill_cost_share * 100).normalize():f}",
+                f"{(cfg.max_fill_cost_share * Decimal(100)).normalize():f}",
             )
         risky = sorted(
             (

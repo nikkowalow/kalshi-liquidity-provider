@@ -38,6 +38,8 @@ class RewardParams:
     full_credit_fraction: Decimal = Decimal("0.2")
     reward_per_day: Decimal = ZERO  # dollars, 0 when the market has no program
     period_end: datetime | None = None  # when the current program period ends (payout follows)
+    period_start: datetime | None = None
+    period_reward: Decimal = ZERO  # dollars the program pays out over the whole period
 
     def days_left(self, now: datetime | None = None) -> Decimal:
         if self.period_end is None:

@@ -12,6 +12,7 @@ export interface Totals {
   rewards_earned: Num // all runs in this journal
   rewards_session?: Num // since the bot last started
   rewards_per_hour: Num
+  rewards_paid?: Num // Kalshi's actual payouts, from balance reconciliation (null until checked)
   requotes: Num
   fills?: Num // all runs in this journal
   resting_orders: Num
@@ -25,6 +26,9 @@ export interface Book {
   ask_size: Num
   yes_depth: Num
   no_depth: Num
+  // Best levels of each bid ladder, [leg price, size] best first (newer bots only).
+  yes_levels?: [number, number][]
+  no_levels?: [number, number][]
 }
 
 export interface LegQuote {
@@ -60,7 +64,15 @@ export interface MarketRow {
   realized_pnl: number
   fees: number
   quotes: { yes?: LegQuote; no?: LegQuote }
-  reward: { per_day: number; target_size: Num; discount_factor: Num }
+  event_ticker?: string | null
+  reward: {
+    per_day: number
+    target_size: Num
+    discount_factor: Num
+    period_reward?: Num // dollars the program pays over its whole period (all participants)
+    period_start?: string | null
+    period_end?: string | null
+  }
   competition?: CompetitionInfo | null
   // From the latest selection (see src/kalshi_lp/strategy/fill_risk.py); null if not checked.
   est_daily_reward?: Num // estimated reward $/day at selection
@@ -68,6 +80,8 @@ export interface MarketRow {
   fill_cost_per_day?: Num // what those fills cost (taker fee to exit + adverse move)
   net_daily_reward?: Num // est_daily_reward - fill_cost_per_day
   earned: number
+  paid?: Num // Kalshi payouts matched to this market (best-effort split of the real total)
+  periods?: { end: string | null; earned: Num; paid: Num }[] // per program period, newest first
   rate_per_hour: number
   avg_score: number
   snapshots: number

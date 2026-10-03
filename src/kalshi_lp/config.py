@@ -217,10 +217,11 @@ class SelectionConfig(_Section):
         Decimal("0"),
         ge=0,
         description=(
-            "Skip markets whose projected payout over the program's remaining period is below "
-            "this. Kalshi pays nothing under $1, so spreading thin can earn $0. Markets we "
-            "already have a stake in only need payout_minimum (if lower), so a market near "
-            "the line isn't dropped and re-picked as its estimate wobbles."
+            "Skip markets whose projected payout for the current program period (earned in it so "
+            "far plus the estimate for the rest of it) is below this. Kalshi pays nothing for a "
+            "period under $1, so spreading thin can earn $0. Markets we already have a stake in "
+            "only need payout_minimum (if lower), so a market near the line isn't dropped and "
+            "re-picked as its estimate wobbles."
         ),
     )
     candidate_pool: int = Field(

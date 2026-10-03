@@ -149,11 +149,12 @@ interface RowProps {
   orders: OrderRow[]
   fresh: boolean
   sig: string // everything the row shows; unchanged signature = skip re-rendering it
+  onSelect: (ticker: string) => void // stable (a state setter): left out of the memo check
 }
 
 const Row = memo(RowView, (a, b) => a.sig === b.sig && a.fresh === b.fresh)
 
-function RowView({ m, orders, fresh }: RowProps) {
+function RowView({ m, orders, fresh, onSelect }: RowProps) {
   const b = m.book
   const spread = b && b.bid !== null && b.ask !== null ? b.ask - b.bid : null
   const { yes, no } = m.quotes
@@ -164,8 +165,10 @@ function RowView({ m, orders, fresh }: RowProps) {
   const noRank = sideRank(orders, 'no')
   return (
     <tr
+      onClick={() => onSelect(m.ticker)}
+      title="click for everything about this market"
       className={
-        [fresh ? 'row-new' : '', m.inactive ? 'row-past' : '', m.rate_per_hour > 0 ? 'earning' : '']
+        ['clickable', fresh ? 'row-new' : '', m.inactive ? 'row-past' : '', m.rate_per_hour > 0 ? 'earning' : '']
           .join(' ')
           .trim() || undefined
       }
@@ -242,7 +245,15 @@ function RowView({ m, orders, fresh }: RowProps) {
   )
 }
 
-export function MarketsTable({ markets: all, orders }: { markets: MarketRow[]; orders: OrderRow[] }) {
+export function MarketsTable({
+  markets: all,
+  orders,
+  onSelect,
+}: {
+  markets: MarketRow[]
+  orders: OrderRow[]
+  onSelect: (ticker: string) => void
+}) {
   const [showPast, setShowPast] = useState(true)
   const active = all.filter((m) => !m.inactive).length
   const pastCount = all.length - active
@@ -263,7 +274,7 @@ export function MarketsTable({ markets: all, orders }: { markets: MarketRow[]; o
       tools={
         <>
           <span className="dim">
-            book = live YES bid/ask · quotes = bot&apos;s desired YES bid / ask · share = est. reward
+            click a row for details · book = live YES bid/ask · quotes = bot&apos;s desired YES bid / ask · share = est. reward
             share YES/NO{' '}
           </span>
           {pastCount > 0 && (
@@ -308,6 +319,7 @@ export function MarketsTable({ markets: all, orders }: { markets: MarketRow[]; o
                 orders={byTicker.get(m.ticker) ?? []}
                 fresh={fresh.has(m.ticker)}
                 sig={JSON.stringify(m) + JSON.stringify(byTicker.get(m.ticker))}
+                onSelect={onSelect}
               />
             ))}
           </tbody>

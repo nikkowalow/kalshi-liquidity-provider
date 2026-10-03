@@ -4,12 +4,13 @@ import { Controls } from './components/Controls'
 import { EarningsMix } from './components/EarningsMix'
 import { HelpLayer } from './components/HelpLayer'
 import { Kpis } from './components/Kpis'
+import { MarketDetail } from './components/MarketDetail'
 import { MarketsTable } from './components/MarketsTable'
 import { LogPanel, OrdersAndFills, RunConfig, Selections } from './components/SidePanels'
 import { Scanner } from './components/Scanner'
 import { Tape } from './components/Tape'
 import { TopBar } from './components/TopBar'
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { num } from './lib/format'
 import { scaleJournal, scaleSamples, scaleState } from './lib/scale'
 import { useJournal } from './lib/useJournal'
@@ -40,6 +41,12 @@ export default function App() {
     [raw.live, multiplier, rewardFactor],
   )
   const configText = state?.config ? JSON.stringify(state.config, null, 2) : null
+  // The market whose popup is open (looked up in each snapshot, so it stays live).
+  const [selected, setSelected] = useState<string | null>(null)
+  const closeDetail = useCallback(() => setSelected(null), [])
+  const detail = selected ? state?.markets.find((m) => m.ticker === selected) : undefined
+  const payoutMinimum =
+    num((state?.config as { selection?: { payout_minimum?: unknown } } | undefined)?.selection?.payout_minimum) ?? 1
   const rejects = useMemo(
     () => journal.orders.filter((o) => o.action === 'reject').length,
     [journal.orders],
@@ -66,7 +73,7 @@ export default function App() {
       <Kpis state={state} fills={journal.fills.length} rejects={rejects} live={live} />
       <Tape fills={journal.fills} orders={journal.orders} logs={journal.logs} />
       <div className="grid">
-        <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} />
+        <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} onSelect={setSelected} />
         <Charts journal={journal} state={state} live={live} />
         <EarningsMix state={state} />
         <Scanner scan={raw.scan} />
@@ -86,6 +93,15 @@ export default function App() {
         reward figures are the bot&apos;s own estimate of Kalshi&apos;s scoring, not a
         statement · hover any underlined label for an explanation
       </div>
+      {detail && (
+        <MarketDetail
+          market={detail}
+          orders={(state?.orders ?? []).filter((o) => o.ticker === detail.ticker)}
+          journal={journal}
+          payoutMinimum={payoutMinimum}
+          onClose={closeDetail}
+        />
+      )}
       <HelpLayer />
     </>
   )

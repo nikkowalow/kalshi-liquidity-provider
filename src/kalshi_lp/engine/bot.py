@@ -39,9 +39,15 @@ from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.types import ZERO, Leg, Quote, Side
 from kalshi_lp.engine import budget
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
+from kalshi_lp.engine.payouts import PayoutTracker
 from kalshi_lp.engine.queue import queue_report
 from kalshi_lp.engine.reconciler import Plan, reconcile
-from kalshi_lp.engine.reward_tracker import RewardTracker, own_orders_by_leg, strip_own
+from kalshi_lp.engine.reward_tracker import (
+    MarketRewardStats,
+    RewardTracker,
+    own_orders_by_leg,
+    strip_own,
+)
 from kalshi_lp.engine.risk import Mark, RiskManager, RiskView
 from kalshi_lp.exchange.auth import Signer
 from kalshi_lp.exchange.client import KalshiClient
@@ -66,6 +72,8 @@ TRANSIENT_ERRORS = (KalshiError, httpx.HTTPError)
 RESIZE_STEP = Decimal("0.2")  # auto sizing: grow a market's size only by 20% or more
 FLATTEN_WARN_SECONDS = 300.0  # "can't flatten" is logged at most this often per market
 SCANNER_FIRST_DELAY = 20.0  # seconds after start-up: the first market scan goes first
+PAYOUT_CHECK_SECONDS = 300.0  # reconcile the balance for reward payouts this often
+BOOK_LEVELS = 10  # bid levels per side in each snapshot's book (the market popup's ladder)
 
 
 class Feed(Protocol):
@@ -150,6 +158,10 @@ class LiquidityBot:
         self.fills_total = int(prev.get("fills_total") or 0)
         self._requotes_before = int(prev.get("requotes_total") or 0)
         self.first_started_at = float(prev.get("first_started_at") or self.started_at)
+        minimum = settings.selection.payout_minimum
+        self.payouts: PayoutTracker | None = (
+            PayoutTracker.restore(prev["payouts"], minimum) if prev.get("payouts") else None
+        )
         self.state.listeners.append(self._count_fills)
         self._config_json = settings.model_dump(mode="json")
         self._group_needs_reset = False
@@ -213,6 +225,8 @@ class LiquidityBot:
             ]
             if self.scanner is not None:
                 tasks.append(asyncio.create_task(self._scanner_loop(), name="scanner"))
+            if not s.dry_run:
+                tasks.append(asyncio.create_task(self._payout_loop(), name="payouts"))
             for task in tasks:
                 task.add_done_callback(_report_crash)
             await self._quote_loop(max_requotes)
@@ -363,9 +377,15 @@ class LiquidityBot:
         Reads state but changes nothing, so it runs without the quoting lock and
         the bot keeps quoting through a scan.
         """
-        # Markets we have a stake in: quoting now, or rewards already earned toward the
-        # payout (this session or earlier ones). Selection gives them a small edge.
-        incumbents = {t: s.earned for t, s in self.tracker.stats.items() if s.earned > 0}
+        # Markets we have a stake in: quoting now, or rewards earned in a program period
+        # that's still running. Kalshi's $1 minimum applies per period, so earnings from
+        # periods that have ended count for nothing here. Selection gives these an edge.
+        now_wall = time.time()
+        incumbents = {
+            t: earned
+            for t, s in self.tracker.stats.items()
+            if (earned := s.open_period_earned(now_wall)) > 0
+        }
         for ticker in self.markets:
             if ticker not in self.reduce_only:
                 incumbents.setdefault(ticker, ZERO)
@@ -1040,6 +1060,44 @@ class LiquidityBot:
                 log.exception("market scanner crashed; retrying next interval")
             await self._sleep(self.settings.scanner.interval_seconds)
 
+    async def _payout_loop(self) -> None:
+        """Find the reward payouts Kalshi actually made (see :mod:`engine.payouts`)."""
+        while not self.stopping:
+            try:
+                await self.check_payouts()
+            except TRANSIENT_ERRORS as exc:
+                log.warning("payout check failed: %s; retrying next interval", exc)
+            except Exception:
+                log.exception("payout check crashed; retrying next interval")
+            await self._sleep(PAYOUT_CHECK_SECONDS)
+
+    async def check_payouts(self) -> None:
+        balance = (await self.client.get_balance()).balance
+        now = time.time()
+        if self.payouts is None:
+            # Baseline: the journal's first balance reading, so payouts since the first run count.
+            first = self.journal.first_metrics()
+            since, start = (
+                (float(first["ts"]), Decimal(str(first["balance"])))
+                if first and first.get("balance") is not None
+                else (now, balance)
+            )
+            self.payouts = PayoutTracker(since, start, self.settings.selection.payout_minimum)
+        payout = await self.payouts.refresh(
+            self.client, balance, self.tracker.ended_periods(now), now
+        )
+        if payout is None:
+            return
+        log.info(
+            "REWARD PAYOUT found: $%.4f (total paid $%.4f); matched to %s",
+            payout.amount,
+            self.payouts.paid,
+            ", ".join(f"{k.rstrip('|')} ${v:.2f}" for k, v in payout.split.items()) or "nothing",
+        )
+        self.journal.event(
+            "payout", amount=payout.amount, total=self.payouts.paid, split=payout.split
+        )
+
     async def _report_rewards(self) -> None:
         if self.tracker.stats:
             for line in self.tracker.report_lines():
@@ -1119,6 +1177,7 @@ class LiquidityBot:
             set(self.tracker.stats) - set(live),
             key=lambda t: -self.tracker.stats[t].earned,
         )
+        paid_by_market = self.payouts.by_market() if self.payouts else {}
         for ticker in live + past:
             market = self.markets.get(ticker)
             book = self.state.book(ticker)
@@ -1151,10 +1210,14 @@ class LiquidityBot:
                     "realized_pnl": pos.realized_pnl if pos else 0,
                     "fees": pos.fees_paid if pos else 0,
                     "quotes": {leg.value: _leg_json(d) for leg, d in decisions.items()},
+                    "event_ticker": market.event_ticker if market else None,
                     "reward": {
                         "per_day": params.reward_per_day if params else 0,
                         "target_size": params.target_size if params else None,
                         "discount_factor": params.discount_factor if params else None,
+                        "period_reward": params.period_reward if params else None,
+                        "period_start": params.period_start if params else None,
+                        "period_end": params.period_end if params else None,
                     },
                     "competition": _competition_json(
                         competition(
@@ -1174,6 +1237,8 @@ class LiquidityBot:
                     if ticker in self._selected
                     else None,
                     "earned": stats.earned if stats else 0,
+                    "paid": paid_by_market.get(ticker),
+                    "periods": _periods_json(ticker, stats, self.payouts),
                     "rate_per_hour": stats.hourly_rate(now) if stats else 0,
                     "avg_score": stats.avg_score if stats else 0,
                     "snapshots": stats.snapshots if stats else 0,
@@ -1206,6 +1271,8 @@ class LiquidityBot:
                 "rewards_earned": rewards_total,  # all runs in this journal
                 "rewards_session": self.tracker.session_earned,
                 "rewards_per_hour": rate,
+                # Kalshi's actual payouts, from the balance (None until the first check).
+                "rewards_paid": self.payouts.paid if self.payouts else None,
                 "requotes": self.requotes,
                 "fills": self.fills_total,
                 "resting_orders": len(self.state.our_orders()),
@@ -1217,6 +1284,7 @@ class LiquidityBot:
             "ledger": self.tracker.ledger(self.titles),
             "rewards_unattributed": self.tracker.unattributed,
             "fills_total": self.fills_total,
+            "payouts": self.payouts.export() if self.payouts else None,
             "requotes_total": self._requotes_before + self.requotes,
         }
 
@@ -1353,6 +1421,26 @@ def _competition_text(comp: Competition | None) -> str:
     return f"competition {comp.level}, {room}"
 
 
+def _periods_json(
+    ticker: str, stats: MarketRewardStats | None, payouts: PayoutTracker | None
+) -> list[dict[str, Any]]:
+    """Earned (estimate) and paid (matched payouts) per program period, newest first."""
+    paid = payouts.period_paid if payouts else {}
+    ends = set(stats.periods) if stats else set()
+    ends |= {k.split("|", 1)[1] for k in paid if k.startswith(f"{ticker}|")}
+    legacy = stats.earned - sum(stats.periods.values(), ZERO) if stats else ZERO
+    if legacy > 0:
+        ends.add("")
+    return [
+        {
+            "end": end or None,  # None: earned before periods were tracked (period unknown)
+            "earned": (stats.periods.get(end) if end else legacy) if stats else None,
+            "paid": paid.get(f"{ticker}|{end}"),
+        }
+        for end in sorted(ends, reverse=True)
+    ]
+
+
 def _book_json(book: Orderbook | None) -> dict[str, Any] | None:
     if book is None:
         return None
@@ -1364,4 +1452,7 @@ def _book_json(book: Orderbook | None) -> dict[str, Any] | None:
         "ask_size": book.no[0].size if book.no else None,
         "yes_depth": book.depth(Leg.YES),
         "no_depth": book.depth(Leg.NO),
+        # Best BOOK_LEVELS of each bid ladder, [leg price, size], for the market popup.
+        "yes_levels": [[lvl.price, lvl.size] for lvl in book.yes[:BOOK_LEVELS]],
+        "no_levels": [[lvl.price, lvl.size] for lvl in book.no[:BOOK_LEVELS]],
     }

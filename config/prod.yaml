@@ -47,7 +47,8 @@ selection:
   # The $1 rule. Kalshi pays nothing under $1 per market, so only enter a market projected to
   # pay 2x that by its period end/close (room for pauses and estimate error). Once in, it only
   # needs payout_minimum ($1), so it isn't dropped and re-picked as its estimate wobbles.
-  # Earnings already made count toward both.
+  # Programs run in daily periods and the minimum applies to each one: only earnings in
+  # the current period count toward these.
   min_period_payout: 2
   payout_minimum: 1
   protect_unpaid: true # leaving a market with unpaid earnings under $1 forfeits them: count that

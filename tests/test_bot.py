@@ -472,3 +472,20 @@ async def test_cant_flatten_warning_is_not_repeated_every_requote(
     for _ in range(5):
         assert not bot._add_exit(Plan(), T, D(8), None, D("0.02"))
     assert caplog.text.count("can't flatten") == 1
+
+
+async def test_only_the_running_period_counts_as_a_stake(exchange: FakeExchange) -> None:
+    # Kalshi's $1 minimum applies per program period: earnings from a period that has
+    # ended can't help a new one reach it, so they give no stake or head start.
+    bot, _ = await started(exchange)
+    now = datetime.now(UTC)
+    ended, running = now - timedelta(hours=2), now + timedelta(hours=5)
+    bot.tracker.restore(
+        {
+            "OLD-1": {"earned": 3, "periods": {ended.isoformat(): 3}},
+            "NOW-1": {"earned": 0.7, "periods": {ended.isoformat(): 0.5, running.isoformat(): 0.2}},
+        }
+    )
+    scan = await bot._scan()
+    assert "OLD-1" not in scan.incumbents
+    assert scan.incumbents["NOW-1"] == Decimal("0.2")

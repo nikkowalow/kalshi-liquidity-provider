@@ -111,6 +111,14 @@ class RunJournal:
         for subscriber in self.subscribers:
             subscriber("state", text)
 
+    def first_metrics(self) -> dict[str, Any] | None:
+        """The journal's first totals sample (the earliest balance on record), if any."""
+        with contextlib.suppress(OSError, ValueError), (self.dir / "metrics.jsonl").open() as f:
+            line = f.readline()
+            data = json.loads(line) if line else None
+            return data if isinstance(data, dict) else None
+        return None
+
     def write_scan(self, report: dict[str, Any]) -> None:
         """The market scanner's latest report (``scan.json``, replaced each scan)."""
         text = json.dumps(report, default=_default)

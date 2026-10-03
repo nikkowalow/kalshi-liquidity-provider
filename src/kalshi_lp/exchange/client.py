@@ -265,6 +265,21 @@ class KalshiClient:
         data = await self._request("GET", "/portfolio/balance", params=self._sub())
         return Balance.from_api(data)
 
+    async def get_cash_records(
+        self, kind: str, *, min_ts: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Raw ``/portfolio/<kind>`` records: fills, settlements, deposits or withdrawals.
+
+        Everything that moves the balance except reward payouts, which Kalshi's API
+        doesn't list (see :mod:`engine.payouts`).
+        """
+        params: dict[str, Any] = {"limit": 200}
+        if kind in ("fills", "settlements"):
+            params.update(self._sub())
+            if min_ts is not None:
+                params["min_ts"] = int(min_ts)
+        return [r async for r in self._paginate(f"/portfolio/{kind}", kind, params)]
+
     async def get_positions(self, ticker: str | None = None) -> dict[str, Position]:
         # No count_filter: flat markets must still appear so their realized P&L is tracked.
         params: dict[str, Any] = {"limit": 1000, **self._sub()}

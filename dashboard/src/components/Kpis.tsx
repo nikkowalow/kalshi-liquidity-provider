@@ -96,6 +96,18 @@ export function Kpis({
         }
       />
       <Kpi
+        label="Rewards paid"
+        value={<span className="pos">{usd(t?.rewards_paid)}</span>}
+        raw={num(t?.rewards_paid)}
+        sub={
+          t?.rewards_paid == null
+            ? 'checking Kalshi…'
+            : num(t.rewards_earned)
+              ? `actual · ${((num(t.rewards_paid)! / num(t.rewards_earned)!) * 100).toFixed(0)}% of est.`
+              : 'actual, from Kalshi'
+        }
+      />
+      <Kpi
         label="Reward rate"
         value={`${usd(rate, 3)}/h`}
         raw={rate}
