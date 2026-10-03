@@ -121,9 +121,18 @@ quoting:
 risk:
   max_capital: 250 # $ cap: position cost + cash locked in resting orders (actual $, per price)
   max_position_per_market: 150 # also caps order size; keep >= quoting.max_size
-  max_total_exposure: 40 # with flatten_on_fill, positions only exist for the seconds it takes to exit
-  flatten_on_fill: true # never hold shares: on a fill, pull that market's quotes and exit at once
-  flatten_slippage: 0.02 # an exit may trade up to 2c through the best price to get out fully
+  max_total_exposure: 40 # with flatten_on_fill, positions only last until the exit fills
+  flatten_on_fill: true # never hold shares: on a fill, pull that market's quotes and get out
+  # How: a fill comes from a sweep that just emptied the bids, so crossing at once sells at the
+  # worst price. On our first 10 measured fills, crossing at once lost $6.33; the price an hour
+  # later was ~$3.90 better. So rest an exit at the entry price, and cross only when:
+  exit_mode: passive
+  unwind_seconds: 900 # ...15 min pass without getting out,
+  unwind_stop: 0.05 # ...others offer our side 5c+ below entry (a real move, not an empty bid),
+  unwind_giveup: 0 # (rest exactly at entry: break even)
+  # ...the bid comes back to the entry, or the market is about to close. Halts, the dashboard's
+  # flatten button and shutdown always cross at once.
+  flatten_slippage: 0.02 # a crossing exit may trade up to 2c through the best price
   flatten_retry_seconds: 2
   max_session_loss: 20 # halt and cancel everything: 2 worst-case fills, or ~10 typical ones
   # (a typical fill loses ~8c x ~25 contracts = ~$2)

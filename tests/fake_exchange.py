@@ -32,6 +32,7 @@ class FakeExchange:
         self.trading_active = True
         self.cancel_all_calls = 0
         self.exits: list[Quote] = []
+        self.unwinds: list[Quote] = []  # passive exit orders placed
         self.program_calls = 0
         self.trades: dict[str, list[Trade]] = {}  # public trades per market
         self.trade_calls: list[tuple[str, float | None]] = []  # (ticker, min_ts) per get_trades
@@ -97,8 +98,17 @@ class FakeExchange:
     async def create_order(
         self, quote: Quote, client_order_id: str, *, time_in_force: str = "", **_: object
     ) -> OrderResult:
-        """Immediate-or-cancel exits fill in full at their limit (enough liquidity assumed)."""
-        assert time_in_force == "immediate_or_cancel", "the bot only sends exits one at a time"
+        """Immediate-or-cancel exits fill in full at their limit (enough liquidity assumed).
+
+        Anything else (a passive exit) rests like a quote.
+        """
+        if time_in_force != "immediate_or_cancel":
+            oid = f"o{next(self._ids)}"
+            self.orders[oid] = Order(
+                oid, client_order_id, quote.ticker, quote.side, quote.price, quote.size, "resting"
+            )
+            self.unwinds.append(quote)
+            return OrderResult(oid, client_order_id)
         self.exits.append(quote)
         signed = quote.size if quote.side.value == "bid" else -quote.size
         prev = self.positions.get(quote.ticker, Position.flat(quote.ticker))

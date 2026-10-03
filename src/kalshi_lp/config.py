@@ -363,6 +363,32 @@ class RiskConfig(_Section):
     flatten_retry_seconds: float = Field(
         2.0, gt=0, description="Minimum time between exit attempts in one market."
     )
+    exit_mode: Literal["immediate", "passive"] = Field(
+        "immediate",
+        description=(
+            "How flatten_on_fill closes a position. immediate: cross the book at once. "
+            "passive: rest an exit order at the entry price for up to unwind_seconds (a fill "
+            "usually comes from a sweep that just emptied the book, so crossing at once sells "
+            "at the worst price), crossing early when the price really moves against us "
+            "(unwind_stop) or when the market is about to close."
+        ),
+    )
+    unwind_seconds: float = Field(
+        900, gt=0, description="passive exits: cross the book if not out after this long."
+    )
+    unwind_stop: Decimal = Field(
+        Decimal("0.05"),
+        gt=0,
+        description=(
+            "passive exits: cross the book once others offer our side this far below our "
+            "entry (the price we could buy it back at, not the bid a sweep just emptied)."
+        ),
+    )
+    unwind_giveup: Decimal = Field(
+        Decimal("0"),
+        ge=0,
+        description="passive exits: rest this far below the entry price (0 = break even).",
+    )
     close_buffer_seconds: float = Field(
         900, ge=0, description="Stop quoting this long before a market closes."
     )

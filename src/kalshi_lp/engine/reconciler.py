@@ -31,17 +31,20 @@ class Plan:
     creates: list[Quote] = field(default_factory=list)
     # Immediate-or-cancel orders that cross the book to close a position (see bot flattening).
     exits: list[Quote] = field(default_factory=list)
+    # Resting (post-only) orders that close a position at a set price (passive exits).
+    unwinds: list[Quote] = field(default_factory=list)
     # Why each action happens: by order id (cancels, decreases) or quote key (creates).
     why: dict[str | tuple[str, Side, Decimal], str] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
-        return bool(self.cancels or self.decreases or self.creates or self.exits)
+        return bool(self.cancels or self.decreases or self.creates or self.exits or self.unwinds)
 
     def extend(self, other: Plan) -> None:
         self.cancels += other.cancels
         self.decreases += other.decreases
         self.creates += other.creates
         self.exits += other.exits
+        self.unwinds += other.unwinds
         self.why.update(other.why)
 
     def cancel(self, orders: Iterable[Order], reason: str) -> None:

@@ -340,7 +340,7 @@ export function MarketDetail({
     m.inactive && 'not quoted now (past market)',
     !m.healthy && 'book not trusted (blind)',
     m.paused && `paused: ${m.pause_reason ?? 'risk limit'}`,
-    m.flattening && 'closing out a filled position',
+    m.unwind ? `exit resting at ${px(m.unwind.price)}` : m.flattening && 'closing out a filled position',
     m.near_close && 'closing soon: quotes pulled',
     m.reduce_only && 'reduce-only',
   ].filter(Boolean) as string[]
@@ -425,6 +425,20 @@ export function MarketDetail({
               {signedUsd(fillCash(fills))} · {fills.length} fills
             </Field>
             <Field label="Size per side">{m.size == null ? '—' : `${qty(m.size)} contracts`}</Field>
+            {m.unwind && (
+              <>
+                <h4>Exit order (passive)</h4>
+                <Field label="Resting" cls={sideClass(m.unwind.side)}>
+                  {m.unwind.side === 'ask' ? 'sell YES' : 'sell NO (YES bid)'} {qty(m.unwind.size)} @{' '}
+                  {px(m.unwind.price)}
+                </Field>
+                <Field label="Entry">{px(m.unwind.entry)}</Field>
+                <Field label="Crosses the book in">
+                  {m.unwind.seconds_left == null ? '—' : span(m.unwind.seconds_left)}
+                </Field>
+                <div className="md-sub">{m.unwind.why}</div>
+              </>
+            )}
             <h4>Our quotes</h4>
             <table>
               <thead>

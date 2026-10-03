@@ -112,7 +112,8 @@ function Flags({ m }: { m: MarketRow }) {
   }
   const flags: [string, string, string?][] = []
   if (!m.healthy) flags.push(['BLIND', 'neg'])
-  if (m.flattening) flags.push(['FLATTENING', 'mg'])
+  if (m.unwind) flags.push([`UNWIND @${px(m.unwind.price)}`, 'mg', 'flag:UNWIND'])
+  else if (m.flattening) flags.push(['FLATTENING', 'mg'])
   if (m.paused) {
     const left = Math.round(m.pause_left ?? 0)
     const label = `PAUSED ${left >= 60 ? `${Math.ceil(left / 60)}m` : `${left}s`}`

@@ -49,6 +49,7 @@ from kalshi_lp.engine.reward_tracker import (
     strip_own,
 )
 from kalshi_lp.engine.risk import Mark, RiskManager, RiskView
+from kalshi_lp.engine.unwind import Entry, plan_exit
 from kalshi_lp.exchange.auth import Signer
 from kalshi_lp.exchange.client import KalshiClient
 from kalshi_lp.exchange.errors import KalshiError
@@ -168,6 +169,8 @@ class LiquidityBot:
         self._budget_binding = False
         self._last_exit: dict[str, float] = {}  # ticker -> monotonic time of the last exit order
         self._flatten_warned: dict[str, float] = {}  # ticker -> last "can't flatten" warning
+        self._entries: dict[str, Entry] = {}  # open positions' average entry (from fills)
+        self._unwinding: dict[str, dict[str, Any]] = {}  # passive exits resting now
         self._selected_at: dict[str, float] = {}  # ticker -> monotonic time it was selected
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
@@ -181,6 +184,38 @@ class LiquidityBot:
     def _count_fills(self, kind: str, data: dict[str, Any]) -> None:
         if kind == "fill":
             self.fills_total += 1
+            self._note_entry(data)
+
+    def _note_entry(self, fill: dict[str, Any]) -> None:
+        """Track each open position's average entry price, for passive exits."""
+        if fill.get("post_position") is None or fill.get("price") is None:
+            return
+        ticker = fill["ticker"]
+        price = Decimal(str(fill["price"]))
+        after = Decimal(str(fill["post_position"]))
+        count = Decimal(str(fill["count"]))
+        before = after - (count if fill.get("side") == "bid" else -count)
+        old = self._entries.get(ticker)
+        if after == 0:
+            self._entries.pop(ticker, None)
+        elif old is None or before == 0 or (before > 0) != (after > 0):
+            self._entries[ticker] = Entry(price, time.monotonic())  # opened (or flipped) here
+        elif abs(after) > abs(before):
+            added = abs(after) - abs(before)
+            avg = (old.yes_price * abs(before) + price * added) / abs(after)
+            self._entries[ticker] = Entry(avg, old.opened)
+
+    def _entry(self, ticker: str, position: Decimal, now: float) -> Entry | None:
+        """Average entry of the open position: from fills, else Kalshi's cost basis."""
+        if ticker in self._entries:
+            return self._entries[ticker]
+        pos = self.state.positions.get(ticker)
+        if pos is None or pos.market_exposure <= 0 or (pos.position > 0) != (position > 0):
+            return None
+        leg_price = pos.market_exposure / abs(pos.position)  # what each held contract cost
+        entry = Entry(leg_price if position > 0 else 1 - leg_price, now)
+        self._entries[ticker] = entry
+        return entry
 
     def stop(self) -> None:
         log.info("stop requested")
@@ -657,25 +692,94 @@ class LiquidityBot:
         return decisions
 
     def _flatten(self, ticker: str, own: list[Order], plan: Plan) -> bool:
-        """Never hold shares: if ``ticker`` has a position, pull its quotes and exit now.
+        """Never hold shares: if ``ticker`` has a position, pull its quotes and get out.
 
-        Returns True when the market is being flattened (skip normal quoting).
-        Runs before the pause checks on purpose: a fill often triggers a pause,
-        and the position must still be closed.
+        ``risk.exit_mode`` decides how: cross the book now, or rest an exit order at
+        the entry price for a while (see :mod:`engine.unwind`). Returns True while the
+        market holds a position (skip normal quoting). Runs before the pause checks on
+        purpose: a fill often triggers a pause, and the position must still be closed.
+        Only markets the bot trades: a position opened by hand elsewhere is left alone.
         """
         risk = self.settings.risk
         position = self.state.position(ticker)
-        if not risk.flatten_on_fill or position == 0:
+        if position == 0:
+            self._entries.pop(ticker, None)
+            self._unwinding.pop(ticker, None)
+        if not risk.flatten_on_fill or position == 0 or ticker not in self.markets:
             return False
-        plan.cancel(own, f"flatten: holding {position:+f} contracts")
         self._desired.pop(ticker, None)
         self._decisions.pop(ticker, None)
         now = time.monotonic()
+        book = self.state.book(ticker)
+        why = "flatten"
+        if risk.exit_mode == "passive":
+            market = self.markets[ticker]
+            closing = self.risk.near_close(market)
+            exit_ = plan_exit(
+                position,
+                self._entry(ticker, position, now),
+                book,
+                market.grid,
+                now,
+                seconds=risk.unwind_seconds,
+                stop=risk.unwind_stop,
+                giveup=risk.unwind_giveup,
+                emergency="market about to close" if closing else None,
+            )
+            if exit_.action == "rest" and exit_.price is not None:
+                self._rest_exit(ticker, position, exit_.side, exit_.price, exit_.why, own, plan)
+                return True
+            if ticker in self._unwinding:
+                log.info("%s: crossing to exit %s (%s)", ticker, position, exit_.why)
+            why = f"flatten ({exit_.why})"
+        self._unwinding.pop(ticker, None)
+        plan.cancel(own, f"flatten: holding {position:+f} contracts")
         if now - self._last_exit.get(ticker, float("-inf")) < risk.flatten_retry_seconds:
             return True  # an exit just went out; wait for its fills to arrive
-        if self._add_exit(plan, ticker, position, self.state.book(ticker), risk.flatten_slippage):
+        if self._add_exit(plan, ticker, position, book, risk.flatten_slippage, why):
             self._last_exit[ticker] = now
         return True
+
+    def _rest_exit(
+        self,
+        ticker: str,
+        position: Decimal,
+        side: Side,
+        price: Decimal,
+        why: str,
+        own: list[Order],
+        plan: Plan,
+    ) -> None:
+        """Keep one post-only exit order for the whole position at ``price``; cancel the rest."""
+        if ticker not in self._unwinding:
+            log.info(
+                "%s: holding %+f; resting an exit at %s instead of crossing",
+                ticker,
+                position,
+                price,
+            )
+        holding = f"holding {position:+f} contracts"
+        sub = reconcile(
+            [Quote(ticker, side, price, abs(position))],
+            own,
+            reasons={side: why, side.opposite: holding},
+        )
+        plan.unwinds += sub.creates  # outside the order group and the quoting budget
+        sub.creates = []
+        plan.extend(sub)
+        entry = self._entries.get(ticker)
+        self._unwinding[ticker] = {
+            "side": side.value,
+            "price": price,
+            "size": abs(position),
+            "entry": entry.yes_price if entry else None,
+            "seconds_left": max(
+                self.settings.risk.unwind_seconds - (time.monotonic() - entry.opened), 0.0
+            )
+            if entry
+            else None,
+            "why": why,
+        }
 
     def _add_exit(
         self,
@@ -1201,6 +1305,7 @@ class LiquidityBot:
                     "pause_left": self.risk.pause_left(ticker),
                     "flattening": self.settings.risk.flatten_on_fill
                     and self.state.position(ticker) != 0,
+                    "unwind": self._unwinding.get(ticker),  # passive exit resting now
                     "size": self._sizes.get(ticker),
                     "near_close": bool(market and self.risk.near_close(market)),
                     "healthy": self.state.is_healthy(ticker),

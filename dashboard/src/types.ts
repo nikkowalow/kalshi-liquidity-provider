@@ -55,6 +55,15 @@ export interface MarketRow {
   pause_reason?: string | null // why it's paused, e.g. "18 contracts filled in 300s"
   pause_left?: number // seconds until it resumes
   flattening?: boolean // holding a position the bot is closing out
+  // A passive exit resting now (risk.exit_mode: passive); null when crossing or flat.
+  unwind?: {
+    side: 'bid' | 'ask'
+    price: number
+    size: number
+    entry: Num // average YES entry price
+    seconds_left: Num // until it crosses the book anyway
+    why: string
+  } | null
   size?: Num // auto-sized contracts per side, when quoting.auto_size is on
   near_close: boolean
   healthy: boolean

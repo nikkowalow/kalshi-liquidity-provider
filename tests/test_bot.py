@@ -1,5 +1,6 @@
 """End-to-end bot behaviour against an in-memory exchange and a synced fake feed."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -489,3 +490,77 @@ async def test_only_the_running_period_counts_as_a_stake(exchange: FakeExchange)
     scan = await bot._scan()
     assert "OLD-1" not in scan.incumbents
     assert scan.incumbents["NOW-1"] == Decimal("0.2")
+
+
+# ------------------------------------------------------------ passive exits
+
+
+def swept(exchange: FakeExchange) -> None:
+    """The sweep that filled our YES bid also took the bids under it; offers stay."""
+    exchange.books[T] = make_book(yes=[("0.30", 50)], no=[("0.50", 15), ("0.48", 100)])
+
+
+async def test_passive_exit_rests_at_entry_instead_of_crossing(exchange: FakeExchange) -> None:
+    bot, feed = await started(exchange, risk={"flatten_on_fill": True, "exit_mode": "passive"})
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    exchange.fill(bid.order_id, D(10))  # bought 10 YES at 0.40
+    swept(exchange)
+    await step(bot, feed)
+    assert not exchange.exits  # didn't sell into the 0.30 bid
+    assert resting(exchange) == [(Side.ASK, D("0.40"), D(10))]  # only the exit, at the entry
+    assert bot.snapshot()["markets"][0]["unwind"]["price"] == D("0.40")
+    await step(bot, feed)
+    assert len(exchange.unwinds) == 1  # kept, not re-placed every requote
+    exit_order = next(iter(exchange.orders.values()))
+    exchange.fill(exit_order.order_id, D(10))  # someone bought it back from us at 0.40
+    await step(bot, feed)
+    assert exchange.positions[T].position == 0 and not exchange.exits
+    assert bot.snapshot()["markets"][0]["unwind"] is None
+    assert any(o.side is Side.BID for o in exchange.orders.values())  # quoting again
+
+
+async def test_passive_exit_crosses_when_the_market_moves_against_it(
+    exchange: FakeExchange,
+) -> None:
+    bot, feed = await started(exchange, risk={"flatten_on_fill": True, "exit_mode": "passive"})
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    exchange.fill(bid.order_id, D(10))
+    swept(exchange)
+    await step(bot, feed)
+    assert len(exchange.unwinds) == 1
+    exchange.books[T] = make_book(yes=[("0.30", 50)], no=[("0.68", 100)])  # offered at 0.32 now
+    await step(bot, feed)
+    [exit_] = exchange.exits
+    assert exit_.side is Side.ASK and exchange.positions[T].position == 0
+    assert not exchange.orders  # the resting exit was cancelled first
+
+
+async def test_passive_exit_crosses_after_its_window(exchange: FakeExchange) -> None:
+    bot, feed = await started(
+        exchange,
+        risk={"flatten_on_fill": True, "exit_mode": "passive", "unwind_seconds": 0.05},
+    )
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    exchange.fill(bid.order_id, D(10))
+    swept(exchange)
+    await step(bot, feed)
+    assert not exchange.exits
+    await asyncio.sleep(0.06)
+    await step(bot, feed)
+    assert len(exchange.exits) == 1 and exchange.positions[T].position == 0
+
+
+async def test_positions_in_markets_the_bot_doesnt_trade_are_left_alone(
+    exchange: FakeExchange,
+) -> None:
+    from kalshi_lp.exchange.models import Position
+
+    bot, feed = await started(exchange, risk={"flatten_on_fill": True})
+    exchange.positions["MANUAL-1"] = Position("MANUAL-1", D(22), D("19.58"), D(0), D(0))
+    feed.sync()
+    await bot.requote({T, "MANUAL-1"})  # e.g. a fill there marked it for a requote
+    assert not exchange.exits
+    assert exchange.positions["MANUAL-1"].position == 22

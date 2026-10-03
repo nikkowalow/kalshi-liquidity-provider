@@ -78,6 +78,8 @@ class OrderExecutor:
                 log.info("[dry-run] place %s %s", q.ticker, q)
             for q in plan.exits:
                 log.info("[dry-run] exit %s %s", q.ticker, q)
+            for q in plan.unwinds:
+                log.info("[dry-run] unwind %s %s", q.ticker, q)
             return report
 
         await self._cancel(plan.cancels, report)
@@ -110,6 +112,7 @@ class OrderExecutor:
             report.decreased += 1
             report.resized.append(resized)
         await self._exit(plan.exits, report)
+        await self._unwind(plan.unwinds, report)
         await self._create(plan, report)
         return report
 
@@ -134,6 +137,34 @@ class OrderExecutor:
                 continue
             report.exited.append((quote, r.filled))
             log.info("exit %s %s: filled %s", quote.ticker, quote, r.filled)
+
+    async def _unwind(self, quotes: list[Quote], report: ExecutionReport) -> None:
+        """Rest exit orders: post-only, and outside the order group like crossing exits."""
+        for quote in quotes:
+            coid = self.new_client_order_id()
+            try:
+                r = await self.client.create_order(quote, coid, post_only=True)
+            except KalshiAPIError as exc:
+                # post-only refused: the book moved onto our price (the next requote re-plans)
+                report.rejected += 1
+                report.rejections.append((quote, str(exc)))
+                log.info("unwind %s %s rejected: %s", quote.ticker, quote, exc)
+                continue
+            report.created += 1
+            log.info("unwind order %s %s", quote.ticker, quote)
+            remaining = quote.size - r.filled
+            if r.order_id and remaining > 0:
+                report.placed.append(
+                    Order(
+                        r.order_id,
+                        coid,
+                        quote.ticker,
+                        quote.side,
+                        quote.price,
+                        remaining,
+                        "resting",
+                    )
+                )
 
     async def _cancel(self, orders: list[Order], report: ExecutionReport) -> None:
         for i in range(0, len(orders), self.max_batch * 5):  # cancels are 5x cheaper
