@@ -28,6 +28,7 @@ class FakeExchange:
         self.orders: dict[str, Order] = {}
         self.positions: dict[str, Position] = {}
         self.programs: list[IncentiveProgram] = []
+        self.closed_programs: list[IncentiveProgram] = []  # ended, payout pending
         self.balance = Decimal(1000)
         self.trading_active = True
         self.cancel_all_calls = 0
@@ -55,7 +56,11 @@ class FakeExchange:
     async def get_orderbooks(self, tickers: Sequence[str]) -> dict[str, Orderbook]:
         return {t: self._book_with_orders(t) for t in tickers if t in self.books}
 
-    async def get_incentive_programs(self, **_: object) -> list[IncentiveProgram]:
+    async def get_incentive_programs(
+        self, *, status: str = "active", **_: object
+    ) -> list[IncentiveProgram]:
+        if status == "closed":
+            return list(self.closed_programs)
         self.program_calls += 1
         return list(self.programs)
 

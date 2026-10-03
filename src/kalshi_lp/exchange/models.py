@@ -174,6 +174,7 @@ class IncentiveProgram:
     paid_out: bool
     discount_factor: Decimal | None  # 0..1
     target_size: Decimal | None  # contracts per side
+    max_reward_per_account: Decimal | None = None  # dollars one account can earn; None: no cap
 
     @classmethod
     def from_api(cls, d: Mapping[str, Any]) -> IncentiveProgram:
@@ -191,6 +192,11 @@ class IncentiveProgram:
             paid_out=bool(d.get("paid_out")),
             discount_factor=None if bps is None else Decimal(bps) / 10_000,
             target_size=_opt_decimal(d.get("target_size_fp")),
+            max_reward_per_account=(
+                None
+                if d.get("max_reward_per_account") is None
+                else to_decimal(d["max_reward_per_account"]) / 10_000  # centi-cents
+            ),
         )
 
     @property

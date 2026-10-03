@@ -40,6 +40,7 @@ class RewardParams:
     period_end: datetime | None = None  # when the current program period ends (payout follows)
     period_start: datetime | None = None
     period_reward: Decimal = ZERO  # dollars the program pays out over the whole period
+    max_reward_per_account: Decimal | None = None  # dollars one account can earn; None: no cap
 
     def days_left(self, now: datetime | None = None) -> Decimal:
         if self.period_end is None:

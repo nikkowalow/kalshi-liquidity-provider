@@ -635,3 +635,32 @@ async def test_each_fill_records_its_fill_risk(exchange: FakeExchange, tmp_path)
     assert [(r["ticker"], r["order_id"], r["backfilled"]) for r in records] == [
         (T, bid.order_id, False)  # the manual trade in another market gets none
     ]
+
+
+def test_period_status_follows_kalshis_closed_list() -> None:
+    from kalshi_lp.engine.bot import _period_status
+
+    future = (datetime.now(UTC) + timedelta(hours=3)).isoformat()
+    past = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    assert _period_status(T, future, set()) == "running"
+    assert _period_status(T, past, None) is None  # closed list not fetched yet
+    assert _period_status(T, past, {f"{T}|{past}"}) == "awaiting payout"
+    assert _period_status(T, past, set()) == "paid out"  # ended and not closed: paid out
+
+
+def test_max_reward_per_account_is_parsed_in_dollars() -> None:
+    raw = {
+        "id": "p",
+        "market_ticker": T,
+        "incentive_type": "liquidity",
+        "start_date": "2026-10-01T00:00:00Z",
+        "end_date": "2026-10-02T00:00:00Z",
+        "period_reward": 1_000_000,
+        "paid_out": False,
+        "max_reward_per_account": 50_000,  # centi-cents, like period_reward
+    }
+    assert IncentiveProgram.from_api(raw).max_reward_per_account == D(5)
+    assert (
+        IncentiveProgram.from_api({**raw, "max_reward_per_account": None}).max_reward_per_account
+        is None
+    )

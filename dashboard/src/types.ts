@@ -81,6 +81,7 @@ export interface MarketRow {
     period_reward?: Num // dollars the program pays over its whole period (all participants)
     period_start?: string | null
     period_end?: string | null
+    max_reward_per_account?: Num // dollars one account can earn per period; null: no cap
   }
   competition?: CompetitionInfo | null
   // From the latest selection (see src/kalshi_lp/strategy/fill_risk.py); null if not checked.
@@ -95,7 +96,8 @@ export interface MarketRow {
   net_daily_reward?: Num // est_daily_reward - fill_cost_per_day
   earned: number
   paid?: Num // Kalshi payouts matched to this market (best-effort split of the real total)
-  periods?: { end: string | null; earned: Num; paid: Num }[] // per program period, newest first
+  // Per program period, newest first. status: Kalshi's (running / awaiting payout / paid out).
+  periods?: { end: string | null; earned: Num; paid: Num; status?: string | null }[]
   rate_per_hour: number
   avg_score: number
   snapshots: number

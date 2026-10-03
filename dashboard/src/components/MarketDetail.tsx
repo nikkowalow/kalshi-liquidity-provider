@@ -250,6 +250,16 @@ function OrderHistory({ orders }: { orders: OrderEvent[] }) {
   )
 }
 
+const STATUS_CLASS: Record<string, string> = { running: 'yl', 'awaiting payout': 'mg', 'paid out': 'pos' }
+
+/** Kalshi's payout status for this market: the running period, and the last one that ended. */
+function payoutStatus(periods: NonNullable<MarketRow['periods']>): string {
+  const ended = periods.find((p) => p.status && p.status !== 'running')
+  const running = periods.some((p) => p.status === 'running')
+  const now = running ? 'this period: running, pays after it ends' : 'no running period tracked'
+  return ended ? `${now} · last period: ${ended.status}` : now
+}
+
 function PeriodsTable({
   periods,
   minimum,
@@ -268,6 +278,7 @@ function PeriodsTable({
           <th>Earned (est.)</th>
           <th className="l">vs $1 minimum</th>
           <th>Paid (actual, matched)</th>
+          <th className="l">Kalshi</th>
         </tr>
       </thead>
       <tbody>
@@ -292,6 +303,7 @@ function PeriodsTable({
                 )}
               </td>
               <td className={p.paid ? 'pos' : 'dim'}>{p.paid == null ? '—' : usd(p.paid, 4)}</td>
+              <td className={`l ${STATUS_CLASS[p.status ?? ''] ?? 'dim'}`}>{p.status ?? '—'}</td>
             </tr>
           )
         })}
@@ -451,6 +463,12 @@ export function MarketDetail({
             <Field label="Days left">{daysLeft === null ? '—' : daysLeft.toFixed(2)}</Field>
             <Field label="Target size">{qty(r.target_size)} contracts</Field>
             <Field label="Discount factor">{r.discount_factor == null ? '—' : r.discount_factor}</Field>
+            <Field label="Max per account">
+              {r.max_reward_per_account == null ? 'no cap' : `${usd(r.max_reward_per_account)} / period`}
+            </Field>
+            <Field label="Paid out">
+              <span data-help="detail:paidout">{payoutStatus(periods)}</span>
+            </Field>
             <Field label="Competition">
               <CompetitionTag c={m.competition} />
             </Field>

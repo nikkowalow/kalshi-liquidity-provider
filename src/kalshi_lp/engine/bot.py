@@ -29,6 +29,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Protocol
 
@@ -76,6 +77,7 @@ FLATTEN_WARN_SECONDS = 300.0  # "can't flatten" is logged at most this often per
 SCANNER_FIRST_DELAY = 20.0  # seconds after start-up: the first market scan goes first
 LIVE_FILL_RISK_SECONDS = 60.0  # re-estimate fill risk from the resting orders this often
 PAYOUT_CHECK_SECONDS = 300.0  # reconcile the balance for reward payouts this often
+CLOSED_PROGRAMS_SECONDS = 600.0  # refresh which ended program periods still await payout
 BOOK_LEVELS = 10  # bid levels per side in each snapshot's book (the market popup's ladder)
 
 
@@ -178,6 +180,9 @@ class LiquidityBot:
         self._live_risk: dict[str, FillRisk] = {}  # fill risk of the orders resting now
         # Fill risk each market was picked with (for the fill records), carried over restarts.
         self._entry_risk: dict[str, dict[str, Any]] = dict(prev.get("entry_risk") or {})
+        # Ended program periods Kalshi hasn't paid out yet ("ticker|end"); None: not fetched.
+        self._closed_periods: set[str] | None = None
+        self._closed_at = float("-inf")
         self._selected_at: dict[str, float] = {}  # ticker -> monotonic time it was selected
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
@@ -1325,12 +1330,21 @@ class LiquidityBot:
         """Find the reward payouts Kalshi actually made (see :mod:`engine.payouts`)."""
         while not self.stopping:
             try:
+                if time.monotonic() - self._closed_at >= CLOSED_PROGRAMS_SECONDS:
+                    await self.refresh_closed_programs()
                 await self.check_payouts()
             except TRANSIENT_ERRORS as exc:
                 log.warning("payout check failed: %s; retrying next interval", exc)
             except Exception:
                 log.exception("payout check crashed; retrying next interval")
             await self._sleep(PAYOUT_CHECK_SECONDS)
+
+    async def refresh_closed_programs(self) -> None:
+        """Which ended program periods still await payout. An ended period not among them
+        has been paid out by Kalshi (status "paid_out"), whether or not it paid us."""
+        programs = await self.client.get_incentive_programs(status="closed")
+        self._closed_periods = {f"{p.market_ticker}|{p.end.isoformat()}" for p in programs}
+        self._closed_at = time.monotonic()
 
     async def check_payouts(self) -> None:
         balance = (await self.client.get_balance()).balance
@@ -1493,6 +1507,7 @@ class LiquidityBot:
                         "period_reward": params.period_reward if params else None,
                         "period_start": params.period_start if params else None,
                         "period_end": params.period_end if params else None,
+                        "max_reward_per_account": params.max_reward_per_account if params else None,
                     },
                     "competition": _competition_json(
                         competition(
@@ -1514,7 +1529,7 @@ class LiquidityBot:
                     else None,
                     "earned": stats.earned if stats else 0,
                     "paid": paid_by_market.get(ticker),
-                    "periods": _periods_json(ticker, stats, self.payouts),
+                    "periods": _periods_json(ticker, stats, self.payouts, self._closed_periods),
                     "rate_per_hour": stats.hourly_rate(now) if stats else 0,
                     "avg_score": stats.avg_score if stats else 0,
                     "snapshots": stats.snapshots if stats else 0,
@@ -1708,8 +1723,22 @@ def _competition_text(comp: Competition | None) -> str:
     return f"competition {comp.level}, {room}"
 
 
+def _period_status(ticker: str, end: str, closed: set[str] | None) -> str | None:
+    """Kalshi's status of one program period: running, awaiting payout, or paid out."""
+    if not end:
+        return None
+    if datetime.fromisoformat(end).timestamp() > time.time():
+        return "running"
+    if closed is None:
+        return None  # not fetched yet
+    return "awaiting payout" if f"{ticker}|{end}" in closed else "paid out"
+
+
 def _periods_json(
-    ticker: str, stats: MarketRewardStats | None, payouts: PayoutTracker | None
+    ticker: str,
+    stats: MarketRewardStats | None,
+    payouts: PayoutTracker | None,
+    closed: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Earned (estimate) and paid (matched payouts) per program period, newest first."""
     paid = payouts.period_paid if payouts else {}
@@ -1723,6 +1752,7 @@ def _periods_json(
             "end": end or None,  # None: earned before periods were tracked (period unknown)
             "earned": (stats.periods.get(end) if end else legacy) if stats else None,
             "paid": paid.get(f"{ticker}|{end}"),
+            "status": _period_status(ticker, end, closed),
         }
         for end in sorted(ends, reverse=True)
     ]

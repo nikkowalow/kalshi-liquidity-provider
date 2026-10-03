@@ -178,6 +178,11 @@ class MarketSelector:
                 period_end=main.end,
                 period_start=main.start,
                 period_reward=sum((p.period_reward for p in progs), ZERO),
+                max_reward_per_account=(
+                    None
+                    if any(p.max_reward_per_account is None for p in progs)
+                    else sum((p.max_reward_per_account or ZERO for p in progs), ZERO)
+                ),
             )
         return params
 
