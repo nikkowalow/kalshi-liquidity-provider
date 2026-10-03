@@ -1,14 +1,26 @@
-import { type ReactNode, useEffect, useMemo } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { apiUrl } from '../lib/api'
 import type { Journal } from '../lib/useJournal'
 import { num, pct, px, qty, sideClass, signClass, signedUsd, usd } from '../lib/format'
 import { span, useNow } from '../lib/clock'
+import { periodView } from '../lib/period'
 import type { FillEvent, LegQuote, MarketRow, OrderEvent, OrderRow } from '../types'
 import { CompetitionTag } from './CompetitionTag'
 import { RankBadge } from './SidePanels'
 import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
 
-const HISTORY_ROWS = 100
+/** Every order action in a market, from the bot's whole journal (GET /api/history/<ticker>). */
+async function fetchHistory(ticker: string): Promise<OrderEvent[] | null> {
+  try {
+    const res = await fetch(apiUrl(`/api/history/${encodeURIComponent(ticker)}`))
+    return res.ok ? ((await res.json()) as OrderEvent[]) : null
+  } catch {
+    return null
+  }
+}
+
+const orderKey = (o: OrderEvent) => `${o.ts}|${o.order_id ?? ''}|${o.action}|${o.side}|${o.price}`
 
 /** Kalshi's page for the market's series (it lists the current event and its markets). */
 const kalshiUrl = (ticker: string) =>
@@ -311,14 +323,20 @@ export function MarketDetail({
     () => journal.fills.filter((f) => f.ticker === m.ticker).reverse(),
     [journal.fills, m.ticker],
   )
-  const history = useMemo(
-    () =>
-      journal.orders
-        .filter((o) => o.ticker === m.ticker)
-        .slice(-HISTORY_ROWS)
-        .reverse(),
-    [journal.orders, m.ticker],
-  )
+  // The market's whole history from the journal, plus whatever arrives while the popup is open.
+  const [full, setFull] = useState<OrderEvent[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    void fetchHistory(m.ticker).then((h) => alive && setFull(h ?? []))
+    return () => {
+      alive = false
+    }
+  }, [m.ticker])
+  const history = useMemo(() => {
+    const live = journal.orders.filter((o) => o.ticker === m.ticker)
+    const seen = new Set((full ?? []).map(orderKey))
+    return [...(full ?? []), ...live.filter((o) => !seen.has(orderKey(o)))].sort((a, b) => b.ts - a.ts)
+  }, [full, journal.orders, m.ticker])
   const quoteChanges = useMemo(
     () => journal.quotes.filter((q) => q.ticker === m.ticker).length,
     [journal.quotes, m.ticker],
@@ -330,12 +348,9 @@ export function MarketDetail({
   const periodStart = isoTs(r.period_start)
   const close = isoTs(m.close_time)
   const daysLeft = periodEnd === null ? null : Math.max(periodEnd - now, 0) / 86400
-  const projected = m.est_daily_reward != null && daysLeft !== null ? m.earned + m.est_daily_reward * daysLeft : null
   const paying = m.snapshots ? m.paying_snapshots / m.snapshots : null
   const periods = m.periods ?? []
-  // Kalshi's minimum applies per period: measure the current one (all-time on older bots).
-  const current = periods.find((p) => p.end !== null && p.end === r.period_end)
-  const periodEarned = m.periods ? (current?.earned ?? 0) : m.earned
+  const { earned: periodEarned, projected } = periodView(m, now)
   const flags = [
     m.inactive && 'not quoted now (past market)',
     !m.healthy && 'book not trusted (blind)',
@@ -384,7 +399,9 @@ export function MarketDetail({
             <Field label="Net (est.)" cls={signClass(m.net_daily_reward)}>
               {m.net_daily_reward == null ? '—' : `${usd(m.net_daily_reward)}/day`}
             </Field>
-            <Field label="Projected by period end">{projected === null ? '—' : usd(projected)}</Field>
+            <Field label="Projected this period">
+              <span data-help="detail:projected">{projected === null ? '—' : usd(projected)}</span>
+            </Field>
             <Field label="Time scoring">
               {paying === null ? '—' : `${pct(paying)} of ${qty(m.snapshots)} snapshots`}
             </Field>
@@ -478,7 +495,10 @@ export function MarketDetail({
             <FillsTable fills={fills} />
           </Card>
 
-          <Card title={`Order history · last ${history.length} · ${quoteChanges} quote changes`} wide>
+          <Card
+            title={`Order history · ${full === null ? 'loading all…' : `${history.length} actions`} · ${quoteChanges} quote changes`}
+            wide
+          >
             <OrderHistory orders={history} />
           </Card>
         </div>

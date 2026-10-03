@@ -1,3 +1,5 @@
+import { apiUrl } from './api'
+
 /** The bot's control actions (POST /api/control/<action>; see src/kalshi_lp/engine/controls.py). */
 export type Action = 'pause' | 'resume' | 'flatten' | 'rescan' | 'budget' | 'stop' | 'config' | 'restart'
 
@@ -9,7 +11,7 @@ export async function sendControl(
 ): Promise<string> {
   let res: Response
   try {
-    res = await fetch(`/api/control/${action}`, {
+    res = await fetch(apiUrl(`/api/control/${action}`), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

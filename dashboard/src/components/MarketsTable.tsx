@@ -2,6 +2,8 @@ import { memo, useState } from 'react'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { num, pct, px, qty, signClass, signedUsd, usd } from '../lib/format'
 import { useFreshKeys } from '../lib/useFreshKeys'
+import { span, useNow } from '../lib/clock'
+import { periodView } from '../lib/period'
 import type { LegQuote, MarketRow, OrderRow } from '../types'
 import { competitionRoom } from '../lib/competition'
 import { CompetitionTag } from './CompetitionTag'
@@ -34,6 +36,8 @@ const COLUMNS: [label: string, align?: 'l'][] = [
   ['Earned'],
   ['$/h'],
   ['$/d'],
+  ['$/period'],
+  ['Period left'],
   ['Mix', 'l'],
   ['Paying'],
   ['Flags', 'l'],
@@ -80,6 +84,8 @@ function accessors(ordersByTicker: Map<string, OrderRow[]>): Accessors<MarketRow
     Earned: (m) => m.earned,
     '$/h': (m) => m.rate_per_hour,
     '$/d': (m) => m.rate_per_hour,
+    '$/period': (m) => periodView(m, Date.now() / 1000).projected,
+    'Period left': (m) => periodView(m, Date.now() / 1000).end,
     Mix: (m) => m.rate_per_hour,
     Paying: (m) => (m.snapshots ? m.paying_snapshots / m.snapshots : null),
     Flags: flagRank,
@@ -105,13 +111,35 @@ function QuoteCell({ q, cls }: { q?: LegQuote; cls: 'bid' | 'ask' }) {
   )
 }
 
-/** This market's share of the total $/h across markets, as a small bar. */
-function MixBar({ share }: { share: number | null }) {
+/** $/period and time left in it. Ticks on its own each second; the row doesn't re-render. */
+function PeriodCells({ m }: { m: MarketRow }) {
+  const now = useNow() / 1000
+  const p = periodView(m, now)
+  const left = p.end === null ? null : p.end - now
+  const closesFirst = p.earningEnd !== null && p.end !== null && p.earningEnd < p.end
+  return (
+    <>
+      <td
+        className={p.projected === null ? 'dim' : p.projected >= 1 ? 'pos' : 'neg'}
+        title={`earned this period ${usd(p.earned, 4)}`}
+      >
+        {p.projected === null ? '—' : usd(p.projected)}
+      </td>
+      <td className="dim" title={closesFirst ? 'the market closes before the period ends' : undefined}>
+        {left === null ? '—' : left <= 0 ? 'ended' : span(left)}
+        {closesFirst && <span className="yl"> ⚑</span>}
+      </td>
+    </>
+  )
+}
+
+/** This market's share of the total $/h; the bar is scaled so the top earner fills it. */
+function MixBar({ share, fill }: { share: number | null; fill: number }) {
   if (share === null) return <span className="dim">—</span>
   return (
     <span className="mini-mix" data-help="mix:bar">
       <span className="mini-mix-track">
-        <span className="mini-mix-bar" style={{ width: `${(share * 100).toFixed(1)}%` }} />
+        <span className="mini-mix-bar" style={{ width: `${(fill * 100).toFixed(1)}%` }} />
       </span>
       <span className="mini-mix-pct">{(share * 100).toFixed(0)}%</span>
     </span>
@@ -166,13 +194,17 @@ interface RowProps {
   orders: OrderRow[]
   fresh: boolean
   share: number | null // of the total $/h across markets (null: not earning)
+  fill: number // bar length: this market's $/h over the top earner's
   sig: string // everything the row shows; unchanged signature = skip re-rendering it
   onSelect: (ticker: string) => void // stable (a state setter): left out of the memo check
 }
 
-const Row = memo(RowView, (a, b) => a.sig === b.sig && a.fresh === b.fresh && a.share === b.share)
+const Row = memo(
+  RowView,
+  (a, b) => a.sig === b.sig && a.fresh === b.fresh && a.share === b.share && a.fill === b.fill,
+)
 
-function RowView({ m, orders, fresh, share, onSelect }: RowProps) {
+function RowView({ m, orders, fresh, share, fill, onSelect }: RowProps) {
   const b = m.book
   const spread = b && b.bid !== null && b.ask !== null ? b.ask - b.bid : null
   const { yes, no } = m.quotes
@@ -253,8 +285,9 @@ function RowView({ m, orders, fresh, share, onSelect }: RowProps) {
         <Flash value={m.rate_per_hour}>{usd(m.rate_per_hour, 3)}</Flash>
       </td>
       <td>{usd(m.rate_per_hour * 24)}</td>
+      <PeriodCells m={m} />
       <td className="l">
-        <MixBar share={share} />
+        <MixBar share={share} fill={fill} />
       </td>
       <td className="dim">{paying === null ? '—' : pct(num(paying))}</td>
       <td className="l">
@@ -286,6 +319,7 @@ export function MarketsTable({
   )
   const fresh = useFreshKeys(markets.map((m) => m.ticker))
   const totalRate = all.reduce((sum, m) => sum + (m.rate_per_hour > 0 ? m.rate_per_hour : 0), 0)
+  const topRate = Math.max(0, ...all.map((m) => m.rate_per_hour))
   return (
     <Panel
       title="Markets"
@@ -339,6 +373,7 @@ export function MarketsTable({
                 orders={byTicker.get(m.ticker) ?? []}
                 fresh={fresh.has(m.ticker)}
                 share={totalRate > 0 && m.rate_per_hour > 0 ? m.rate_per_hour / totalRate : null}
+                fill={topRate > 0 ? Math.max(m.rate_per_hour, 0) / topRate : 0}
                 sig={JSON.stringify(m) + JSON.stringify(byTicker.get(m.ticker))}
                 onSelect={onSelect}
               />

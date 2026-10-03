@@ -89,12 +89,15 @@ ENDPOINTS = {
     "/api/metrics": "totals history, evenly thinned (?points=2000)",
     "/api/scan": "the market scanner: the best markets by $/day at a fixed size (read-only)",
     "/api/ws": "WebSocket: a hello (state, events, metrics), then events and snapshots live",
+    "/api/bots": "every bot running from this runs folder (the dashboard's bot switcher)",
     "/api/config": "the editable settings: file values, running values, schema",
+    "/api/history/<ticker>": "every order action in one market, from the whole journal",
     "/api/control/<action>": "POST with the token: pause, resume, flatten, rescan, budget, stop, "
     "config ({changes: {section.setting: value}}), restart",
 }
 ACTIONS = ("pause", "resume", "flatten", "rescan", "budget", "stop", "config", "restart")
 TOKEN_FILE = "api-token"
+URL_FILE = "api-url"  # where a running bot's API listens, for other dashboards to find it
 
 
 class Controls(Protocol):
@@ -248,6 +251,8 @@ class DashboardApi:
         host, port = runner.addresses[0][:2]
         self.url = f"http://{f'[{host}]' if ':' in host else host}:{port}"
         log.info("dashboard: %s  (API: %s/api)", self.url, self.url)
+        with contextlib.suppress(OSError):
+            (self.journal.dir / URL_FILE).write_text(self.url)
         if self.controls is not None:
             _write_private(self.token_file, self.token)
             log.info("dashboard controls on; token for scripts in %s", self.token_file)
@@ -258,6 +263,8 @@ class DashboardApi:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+            with contextlib.suppress(FileNotFoundError):
+                (self.journal.dir / URL_FILE).unlink()
             if self.controls is not None:
                 with contextlib.suppress(FileNotFoundError):
                     self.token_file.unlink()
@@ -303,7 +310,7 @@ class DashboardApi:
     # ------------------------------------------------------------------ routes
 
     def _build_app(self) -> web.Application:
-        app = web.Application(middlewares=[self._guard])
+        app = web.Application(middlewares=[self._guard, self._cors])
         app.router.add_get("/api", self._index)
         app.router.add_get("/api/health", self._health)
         app.router.add_get("/api/state", self._state)
@@ -313,6 +320,8 @@ class DashboardApi:
         app.router.add_get("/api/metrics", self._metrics)
         app.router.add_get("/api/scan", self._scan)
         app.router.add_get("/api/config", self._config)
+        app.router.add_get("/api/bots", self._bots)
+        app.router.add_get("/api/history/{ticker}", self._history)
         app.router.add_get("/api/ws", self._ws)
         app.router.add_post("/api/control/{action}", self._control)
         app.router.add_get("/api/{rest:.*}", self._not_found)
@@ -332,6 +341,36 @@ class DashboardApi:
         if _is_local(self.cfg.host) and not _is_local(urlsplit(f"//{request.host}").hostname):
             raise web.HTTPForbidden(text="unexpected Host header")
         return await handler(request)
+
+    @web.middleware
+    async def _cors(self, request: web.Request, handler: Handler) -> web.StreamResponse:
+        """Let a dashboard served by another local bot read and drive this one (the switcher).
+
+        _guard already refused other sites, so any Origin that gets here is local.
+        """
+        origin = request.headers.get("Origin")
+        if origin is None or urlsplit(origin).netloc == request.host:
+            return await handler(request)
+        headers = {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Methods": "GET, POST",
+            "Vary": "Origin",
+        }
+        if request.method == "OPTIONS":  # preflight for the buttons' POSTs
+            return web.Response(status=204, headers=headers)
+        response = await handler(request)
+        response.headers.update(headers)
+        return response
+
+    async def _bots(self, _: web.Request) -> web.Response:
+        """Bots that registered an API in this runs folder (each journal's api-url)."""
+        bots = []
+        for path in sorted(self.journal.dir.parent.glob(f"*/{URL_FILE}")):
+            with contextlib.suppress(OSError):
+                url = path.read_text().strip()
+                bots.append({"run_id": path.parent.name, "url": url, "self": url == self.url})
+        return web.json_response(bots)
 
     async def _index(self, _: web.Request) -> web.Response:
         return web.json_response({"run_id": self.journal.run_id, "endpoints": ENDPOINTS})
@@ -363,6 +402,12 @@ class DashboardApi:
     async def _events(self, request: web.Request) -> web.Response:
         limit = _int_param(request, "limit", 500, 1, KEEP_PER_TYPE * 10)
         lines = self.recent.lines(request.query.get("type"), limit)
+        return web.Response(text="[" + ",".join(lines) + "]", content_type="application/json")
+
+    async def _history(self, request: web.Request) -> web.Response:
+        """All of one market's order events (the market popup's full history)."""
+        ticker = request.match_info["ticker"]
+        lines = await asyncio.to_thread(_market_orders, self.journal.dir / "events.jsonl", ticker)
         return web.Response(text="[" + ",".join(lines) + "]", content_type="application/json")
 
     async def _config(self, _: web.Request) -> web.Response:
@@ -584,6 +629,21 @@ def _fill_lines(path: Path) -> list[str]:
                 line.decode(errors="replace").rstrip("\n")
                 for line in f
                 if mark in line[:80] and line.endswith(b"\n")
+            ]
+    except FileNotFoundError:
+        return []
+
+
+def _market_orders(path: Path, ticker: str) -> list[str]:
+    """Every order event for ``ticker`` in the journal file, oldest first (a substring scan)."""
+    kind = b'"type": "order"'
+    needle = json.dumps({"ticker": ticker})[1:-1].encode()  # '"ticker": "..."', as written
+    try:
+        with path.open("rb") as f:
+            return [
+                line.decode(errors="replace").rstrip("\n")
+                for line in f
+                if kind in line[:80] and needle in line and line.endswith(b"\n")
             ]
     except FileNotFoundError:
         return []

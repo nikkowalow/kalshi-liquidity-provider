@@ -30,6 +30,7 @@ export const HELP: Record<string, HelpEntry> = {
     "Counts every unexplained credit to the account, so a promotion or bonus from Kalshi would show up here too. Not shown in dry runs (needs your account)."],
   "flag:UNWIND": ["Unwinding (passive exit)", "An order filled and the bot is getting out of the position with a resting exit order at the entry price, instead of selling into the book a sweep just emptied. It crosses the book anyway if the market moves against the position (others offer it below the entry by risk.unwind_stop), after risk.unwind_seconds, or near the close. The market's quotes stay off until it's flat."],
   "detail:paid": ["Paid by Kalshi", "Kalshi pays each program period separately after it ends. The bot matches every payout it finds to the periods that just ended, in proportion to its estimate for each, so this per-market figure is a best-effort split of the real total. Earnings from before per-period tracking aren't matched to a market."],
+  "detail:projected": ["Projected this period", "What this market should earn in the current program period: what it has earned in the period so far, plus the estimate at selection ($/day) for the time left until the period ends or the market closes, whichever comes first. Earnings from earlier periods aren't included: Kalshi pays each period on its own, and pays nothing for one under $1. This is the number the bot's $1 / $2 payout filters use."],
   "detail:minimum": ["$1 minimum", "Kalshi pays nothing for a period that earned under $1. The bar shows the bot's estimate for the current period against that minimum."],
   "kpi:Reward rate": ["Reward rate", "Estimated rewards earned over roughly the last 10 minutes, as dollars per hour. The small line underneath projects that rate over a full day."],
   "panel:trades": ["Fill history", "Every position the bot has held, from its first fill to the fill that made it flat. Entry and exit are average prices in the held side's terms (a NO bought at 40c shows 0.40). P&L is the cash those fills moved, fees included. A position with no closing fill is still open, or was settled by Kalshi (settlements aren't fills)."],
@@ -76,7 +77,9 @@ export const HELP: Record<string, HelpEntry> = {
   "col:Earned": ["Earned", "The bot's estimate of rewards earned in this market, across all sessions."],
   "col:$/h": ["$/hour", "Your recent reward rate in this market, over roughly the last 10 minutes."],
   "col:$/d": ["$/day", "The $/hour rate projected over 24 hours. Kalshi pays nothing for a period under $1."],
-  "col:Mix": ["Earnings mix", "This market's share of your total $/hour across all markets right now."],
+  "col:$/period": ["$/period", "What this market should earn in the current program period: earned in it so far, plus the estimate at selection for the time left (until the period ends or the market closes). Green once it clears Kalshi's $1 minimum, red below it: Kalshi pays nothing for a period under $1. Hover for what's earned so far."],
+  "col:Period left": ["Period left", "Time until the current program period ends and Kalshi pays it out. ⚑: the market closes before then, so earning stops at the close."],
+  "col:Mix": ["Earnings mix", "The percentage is this market's share of your total $/hour across all markets right now. The bar is scaled to the top earner: its bar is full, and the others are relative to it."],
   "col:Paying": ["Paying", "The share of scored seconds in which your orders earned something. Below 100% means some seconds paid nothing: a side of the book was under Target, your order was too deep in the queue, or you had no order resting."],
   "col:Flags": ["Flags", "Anything unusual about this market right now. Hover a flag for details."],
 

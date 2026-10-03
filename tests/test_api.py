@@ -126,6 +126,57 @@ async def test_every_fill_is_served_even_beyond_the_tail(journal, monkeypatch) -
         assert [e["ticker"] for e in fills] == ["OLDEST", "NEWEST"]  # each once, in order
 
 
+async def test_a_markets_full_order_history_is_served(journal, monkeypatch) -> None:
+    monkeypatch.setattr(api_module, "TAIL_BYTES", 200)  # the hello only has the last lines
+    journal.event("order", action="place", ticker="A-1", price=0.4)
+    for i in range(30):
+        journal.event("order", action="place", ticker="B-1", price=i)
+    journal.event("order", action="cancel", ticker="A-1", price=0.4)
+    journal.event("fill", ticker="A-1")
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None))
+    async with serve(api) as client:
+        history = await get_json(client, "/api/history/A-1")
+        assert [e["action"] for e in history] == ["place", "cancel"]  # orders only, all of them
+        assert await get_json(client, "/api/history/NOPE-1") == []
+
+
+async def test_running_bots_register_and_list_each_other(tmp_path) -> None:
+    prod = RunJournal(tmp_path / "runs", "prod", "live")
+    demo = RunJournal(tmp_path / "runs", "demo", "live")
+    a = DashboardApi(prod, ApiConfig(port=0, static_dir=None))
+    b = DashboardApi(demo, ApiConfig(port=0, static_dir=None))
+    assert await a.start() and await b.start()
+    try:
+        async with aiohttp.ClientSession() as http, http.get(f"{a.url}/api/bots") as resp:
+            bots = {x["run_id"]: x for x in await resp.json()}
+        assert bots["prod-live"]["url"] == a.url and bots["prod-live"]["self"]
+        assert bots["demo-live"]["url"] == b.url and not bots["demo-live"]["self"]
+    finally:
+        await b.stop()
+        await a.stop()
+        prod.close()
+        demo.close()
+    assert not list((tmp_path / "runs").glob("*/api-url"))  # unregistered on stop
+
+
+async def test_another_local_dashboard_may_call_in_but_other_sites_may_not(journal) -> None:
+    controls = FakeControls()
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None), controls)
+    local = {"Origin": "http://127.0.0.1:8050"}  # the prod bot's page, calling this bot
+    async with serve(api) as client:
+        resp = await client.get("/api/health", headers=local)
+        assert resp.status == 200
+        assert resp.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:8050"
+        pre = await client.options("/api/control/pause", headers=local)
+        assert pre.status == 204 and "Authorization" in pre.headers["Access-Control-Allow-Headers"]
+        ok = await client.post("/api/control/pause", headers={**local, **auth(api)})
+        assert ok.status == 200 and ok.headers["Access-Control-Allow-Origin"]
+        evil = await client.get("/api/health", headers={"Origin": "https://evil.example"})
+        assert evil.status == 403
+        same = await client.get("/api/health")  # same origin: no CORS headers needed
+        assert "Access-Control-Allow-Origin" not in same.headers
+
+
 async def test_websocket_says_hello_then_streams_events_and_snapshots(journal) -> None:
     journal.event("order", action="place")
     for i in range(3):

@@ -3,6 +3,7 @@ import { duration } from "../lib/format";
 import type { RunState } from "../types";
 import type { Link } from "../lib/useJournal";
 import { MULTIPLIER_PRESETS } from "../lib/useMultiplier";
+import { BotPicker } from "./BotPicker";
 import { Flash } from "./Flash";
 import { Stamp } from "./Stamp";
 
@@ -59,7 +60,7 @@ export function TopBar({
   return (
     <div className="bar">
       <span className="brand">KLP &lt;GO&gt;</span>
-      <span data-help="bar:run">{runId ?? "—"}</span>
+      <BotPicker runId={runId} />
       {link !== "live" && (
         <span className="badge halted" data-help="bar:link">
           ● {link === "connecting" ? "connecting to bot…" : "bot offline · reconnecting"}

@@ -1,6 +1,6 @@
 import { useEffect, useState, type RefObject } from 'react'
 
-export const ROW_HEIGHT = 18 // px; tables using this pin their rows to it (see .vt in index.css)
+export const ROW_HEIGHT = 20 // px; tables using this pin their rows to it (see .vt in index.css)
 const OVERSCAN = 12
 
 export interface VirtualWindow {

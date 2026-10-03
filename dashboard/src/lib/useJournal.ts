@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { wsUrl } from './api'
 import type {
   ControlInfo,
   FillEvent,
@@ -190,8 +191,7 @@ export function useJournal() {
     }
 
     const connect = () => {
-      const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-      const ws = new WebSocket(`${scheme}://${location.host}/api/ws?points=${HISTORY_POINTS}`)
+      const ws = new WebSocket(wsUrl(`/api/ws?points=${HISTORY_POINTS}`))
       socket = ws
       ws.onmessage = onMessage
       ws.onclose = () => {

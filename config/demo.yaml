@@ -66,3 +66,6 @@ risk:
 logging:
   level: INFO
   file: logs/demo.log
+
+api:
+  port: 8051 # the prod bot's dashboard is on 8050: both can run at once (switch in the top bar)

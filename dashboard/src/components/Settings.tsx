@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { apiUrl } from '../lib/api'
 import { sendControl } from '../lib/control'
 
 /** GET /api/config (see src/kalshi_lp/config_edit.py). */
@@ -120,7 +121,7 @@ function Input({ field, value, onChange }: { field: Field; value: unknown; onCha
 
 async function fetchConfig(): Promise<ConfigResponse | { error: string }> {
   try {
-    const res = await fetch('/api/config')
+    const res = await fetch(apiUrl('/api/config'))
     const data = await res.json()
     return res.ok ? (data as ConfigResponse) : { error: data.error ?? res.statusText }
   } catch (e) {
