@@ -8,7 +8,7 @@ different variable names so a demo config can never pick up production keys.
 from __future__ import annotations
 
 import os
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -342,6 +342,16 @@ class RiskConfig(_Section):
             "New orders are shrunk or skipped to stay under it. None disables."
         ),
     )
+    scale_with_budget: bool = Field(
+        False,
+        description=(
+            "Size everything from max_capital: the per-side loss cap (quoting.max_loss_per_fill) "
+            "is the budget spread over selection.max_markets markets x 2 sides, and the order "
+            "size limits, the exchange fill limit, max_total_exposure and max_session_loss follow "
+            "from that. Change the budget and they all move with it. Their own values in the file "
+            "are then ignored."
+        ),
+    )
     max_position_per_market: Decimal = Field(Decimal("50"), gt=0, description="Contracts.")
     max_total_exposure: Decimal = Field(Decimal("100"), gt=0, description="Dollars at cost.")
     max_session_loss: Decimal = Field(
@@ -528,6 +538,53 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
+# risk.scale_with_budget: how the budget-sized settings follow from the per-side loss cap.
+BUDGET_CHEAPEST_SIDE = Decimal("0.10")  # max_size lets a side this cheap still use its whole cap
+BUDGET_EXPOSURE_FILLS = 4  # max_total_exposure: this many full fills held at once
+BUDGET_SESSION_LOSS_FILLS = 2  # max_session_loss: this many worst-case fills
+
+
+def budget_scaled(settings: Settings) -> Settings:
+    """``settings`` with the budget-sized limits derived from risk.max_capital (if enabled).
+
+    per side = max_capital x capital_utilization / (max_markets x 2), and from that:
+    max_loss_per_fill = per side; max_size = max_position_per_market = per side / 0.10;
+    order_group_contracts_limit = 2 x max_size; max_total_exposure = 4 x per side;
+    max_session_loss = 2 x per side.
+    """
+    risk, quoting = settings.risk, settings.quoting
+    if not risk.scale_with_budget or risk.max_capital is None:
+        return settings
+    markets = Decimal(settings.selection.max_markets)
+    per_side = (risk.max_capital * quoting.capital_utilization / (markets * 2)).quantize(
+        Decimal("0.01"), rounding=ROUND_FLOOR
+    )
+    size = (per_side / BUDGET_CHEAPEST_SIDE).to_integral_value(rounding=ROUND_CEILING)
+    return settings.model_copy(
+        update={
+            "quoting": quoting.model_copy(update={"max_loss_per_fill": per_side, "max_size": size}),
+            "risk": risk.model_copy(
+                update={
+                    "max_position_per_market": size,
+                    "order_group_contracts_limit": int(size) * 2,
+                    "max_total_exposure": per_side * BUDGET_EXPOSURE_FILLS,
+                    "max_session_loss": per_side * BUDGET_SESSION_LOSS_FILLS,
+                }
+            ),
+        }
+    )
+
+
+BUDGET_SCALED = (
+    "quoting.max_loss_per_fill",
+    "quoting.max_size",
+    "risk.max_position_per_market",
+    "risk.order_group_contracts_limit",
+    "risk.max_total_exposure",
+    "risk.max_session_loss",
+)
+
+
 def load_settings(
     path: str | Path, overrides: dict[str, Any] | None = None, *, dotenv: bool = False
 ) -> Settings:
@@ -539,4 +596,4 @@ def load_settings(
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} must contain a YAML mapping")
-    return Settings.model_validate(_deep_merge(raw, overrides or {}))
+    return budget_scaled(Settings.model_validate(_deep_merge(raw, overrides or {})))

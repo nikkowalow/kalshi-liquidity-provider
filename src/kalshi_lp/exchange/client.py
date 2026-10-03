@@ -474,6 +474,15 @@ class KalshiClient:
             bucket=Bucket.WRITE,
         )
 
+    async def update_order_group_limit(self, order_group_id: str, contracts_limit: int) -> None:
+        await self._request(
+            "PUT",
+            f"/portfolio/order_groups/{order_group_id}/limit",
+            params=self._sub(),
+            json={"contracts_limit": contracts_limit},
+            bucket=Bucket.WRITE,
+        )
+
     async def delete_order_group(self, order_group_id: str) -> None:
         await self._request(
             "DELETE",

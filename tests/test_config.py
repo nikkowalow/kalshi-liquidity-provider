@@ -1,8 +1,9 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from kalshi_lp.config import API_URLS, ConfigError, Environment, load_settings
+from kalshi_lp.config import API_URLS, ConfigError, Environment, Settings, load_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,3 +48,25 @@ def test_credentials_are_environment_scoped(tmp_path: Path, monkeypatch) -> None
     cfg.write_text("environment: prod\n")
     with pytest.raises(ConfigError, match="KALSHI_PROD_KEY_ID"):
         load_settings(cfg).credentials()
+
+
+def test_budget_scaling_sizes_everything_from_the_budget() -> None:
+    from kalshi_lp.config import budget_scaled
+
+    base = {
+        "selection": {"max_markets": 10},
+        "quoting": {"capital_utilization": 0.95},
+        "risk": {"max_capital": 500, "scale_with_budget": True, "max_session_loss": 3},
+    }
+    s = budget_scaled(Settings.model_validate(base))
+    assert s.quoting.max_loss_per_fill == Decimal("23.75")  # 500 x 0.95 / (10 markets x 2)
+    assert s.quoting.max_size == 238 and s.risk.max_position_per_market == 238
+    assert s.risk.order_group_contracts_limit == 476
+    assert s.risk.max_total_exposure == Decimal("95.00")
+    assert s.risk.max_session_loss == Decimal("47.50")  # the file's 3 is ignored
+    half = budget_scaled(
+        Settings.model_validate({**base, "risk": {**base["risk"], "max_capital": 250}})
+    )
+    assert half.quoting.max_loss_per_fill == Decimal("11.87")
+    off = Settings.model_validate({**base, "risk": {"max_capital": 500, "max_session_loss": 3}})
+    assert budget_scaled(off) == off  # scaling off: the file's numbers stand

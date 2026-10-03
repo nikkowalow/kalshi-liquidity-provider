@@ -25,7 +25,7 @@ from typing import Any
 import yaml
 from ruamel.yaml import YAML
 
-from kalshi_lp.config import ConfigError, Settings
+from kalshi_lp.config import BUDGET_SCALED, ConfigError, Settings, budget_scaled
 
 EDITABLE_SECTIONS = ("loop", "rate_limits", "selection", "quoting", "risk", "scanner")
 
@@ -48,6 +48,15 @@ def values(path: Path) -> dict[str, Any]:
     """Every editable setting as the file sets it (defaults for what it leaves out)."""
     settings = Settings.model_validate(yaml.safe_load(path.read_text()) or {})
     return sections(settings)
+
+
+def derived(path: Path) -> dict[str, Any]:
+    """Settings the budget sets (risk.scale_with_budget), by "section.setting": their values."""
+    settings = Settings.model_validate(yaml.safe_load(path.read_text()) or {})
+    if not settings.risk.scale_with_budget or settings.risk.max_capital is None:
+        return {}
+    scaled = sections(budget_scaled(settings))
+    return {key: scaled[key.split(".")[0]][key.split(".")[1]] for key in BUDGET_SCALED}
 
 
 def sections(settings: Settings) -> dict[str, Any]:

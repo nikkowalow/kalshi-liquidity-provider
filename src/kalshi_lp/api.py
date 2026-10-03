@@ -613,22 +613,23 @@ def _tail_lines(path: Path, max_bytes: int) -> list[str]:
     return [line for line in data[:end].decode(errors="replace").splitlines() if line]
 
 
-_FILL_MARK = '"type": "fill"'
+_KEEP_ALL = ('"type": "fill"', '"type": "fill_risk"')  # few, and needed in full
 
 
 def _is_fill(line: str) -> bool:
-    return _FILL_MARK in line[:80]  # the journal writes ts and type first
+    head = line[:80]  # the journal writes ts and type first
+    return any(mark in head for mark in _KEEP_ALL)
 
 
 def _fill_lines(path: Path) -> list[str]:
-    """Every fill event in the journal file, oldest first (a fast substring scan)."""
-    mark = _FILL_MARK.encode()
+    """Every fill (and fill_risk record) in the journal file, oldest first."""
+    marks = [m.encode() for m in _KEEP_ALL]
     try:
         with path.open("rb") as f:
             return [
                 line.decode(errors="replace").rstrip("\n")
                 for line in f
-                if mark in line[:80] and line.endswith(b"\n")
+                if any(m in line[:80] for m in marks) and line.endswith(b"\n")
             ]
     except FileNotFoundError:
         return []

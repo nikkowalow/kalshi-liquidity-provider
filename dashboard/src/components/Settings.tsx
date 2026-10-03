@@ -8,6 +8,7 @@ interface ConfigResponse {
   schema: { order: string[]; sections: Record<string, { properties: Record<string, FieldSchema> }> }
   values: Record<string, Record<string, unknown>> // as the file sets them
   running: Record<string, Record<string, unknown>> // as the bot runs now
+  derived?: Record<string, unknown> // set from the budget (risk.scale_with_budget): key -> value
 }
 
 interface FieldSchema {
@@ -203,7 +204,7 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
   const awaitingRestart = config
     ? Object.values(fields)
         .flat()
-        .filter((f) => !same(fileValue(f), runValue(f))).length
+        .filter((f) => !(f.key in (config.derived ?? {})) && !same(fileValue(f), runValue(f))).length
     : 0
 
   const save = async (restart: boolean) => {
@@ -281,15 +282,21 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
             </nav>
             <div className="st-fields">
               {visible.map((f) => {
-                const file = fileValue(f)
+                const fromBudget = config?.derived && f.key in config.derived
+                const file = fromBudget ? config.derived?.[f.key] : fileValue(f)
                 const value = f.key in draft ? draft[f.key] : shown(f, file)
                 const edited = f.key in changes
-                const notRunning = !same(file, runValue(f))
+                const notRunning = !fromBudget && !same(file, runValue(f))
                 return (
                   <div key={f.key} className={`st-row${edited ? ' edited' : ''}`}>
                     <div className="st-name">
                       <b>{q ? f.key : label(f.name)}</b>
                       {edited && <span className="tag yl">changed</span>}
+                      {fromBudget && (
+                        <span className="tag pos" title="risk.scale_with_budget is on: this follows max_capital">
+                          from budget
+                        </span>
+                      )}
                       {notRunning && !edited && (
                         <span className="tag mg" title={`running: ${JSON.stringify(runValue(f))}`}>
                           restart to apply
@@ -308,7 +315,7 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
                         {f.schema.maximum !== undefined && ` · max ${f.schema.maximum}`}
                       </div>
                     </div>
-                    <div className="st-input">
+                    <div className={`st-input${fromBudget ? ' locked' : ''}`}>
                       <Input field={f} value={value} onChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))} />
                       {f.key in draft && (
                         <button

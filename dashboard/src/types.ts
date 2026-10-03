@@ -238,6 +238,28 @@ export interface FillEvent extends Base {
   post_position: string | null
 }
 
+/** One fill-risk estimate (see src/kalshi_lp/engine/fill_records.py). */
+export interface RiskEstimate {
+  ts: number // when it was made
+  basis: 'selection' | 'live' // the planned quote at selection, or the orders resting then
+  events_per_day: Num // fill events a day: daily fill chance = 1 - e^(-this)
+  fills_per_day: Num // contracts a day
+  cost_per_day: Num
+  size: Num
+  approx: boolean // events derived from contracts / size (old selections): a lower bound
+}
+
+/** The fill risk a fill's market had when the bot entered it and right before the fill. */
+export interface FillRiskEvent extends Base {
+  type: 'fill_risk'
+  fill_ts: number
+  order_id: string | null
+  ticker: string
+  entry: RiskEstimate | null
+  at_fill: RiskEstimate | null
+  backfilled: boolean // reconstructed from the journal's selections, not recorded live
+}
+
 export interface QuoteEvent extends Base {
   type: 'quote'
   ticker: string
@@ -298,6 +320,7 @@ export interface RunEndEvent extends Base {
 export type JournalEvent =
   | OrderEvent
   | FillEvent
+  | FillRiskEvent
   | QuoteEvent
   | LogEvent
   | MarketsEvent

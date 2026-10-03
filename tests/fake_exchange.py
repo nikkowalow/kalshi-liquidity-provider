@@ -33,6 +33,7 @@ class FakeExchange:
         self.cancel_all_calls = 0
         self.exits: list[Quote] = []
         self.unwinds: list[Quote] = []  # passive exit orders placed
+        self.group_limits: list[int] = []  # order group limit updates
         self.program_calls = 0
         self.trades: dict[str, list[Trade]] = {}  # public trades per market
         self.trade_calls: list[tuple[str, float | None]] = []  # (ticker, min_ts) per get_trades
@@ -151,6 +152,9 @@ class FakeExchange:
 
     async def reset_order_group(self, order_group_id: str) -> None:
         pass
+
+    async def update_order_group_limit(self, order_group_id: str, contracts_limit: int) -> None:
+        self.group_limits.append(contracts_limit)
 
     async def delete_order_group(self, order_group_id: str) -> None:
         pass

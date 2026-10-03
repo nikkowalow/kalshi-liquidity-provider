@@ -3,6 +3,7 @@ import { wsUrl } from './api'
 import type {
   ControlInfo,
   FillEvent,
+  FillRiskEvent,
   JournalEvent,
   LogEvent,
   MarketsEvent,
@@ -30,6 +31,7 @@ export type Link = 'connecting' | 'live' | 'offline'
 export interface Journal {
   orders: OrderEvent[]
   fills: FillEvent[]
+  fillRisks: FillRiskEvent[] // fill-risk record of each fill (when the market was entered, at the fill)
   quotes: QuoteEvent[]
   logs: LogEvent[]
   selections: MarketsEvent[]
@@ -41,6 +43,7 @@ export interface Journal {
 const emptyJournal = (): Journal => ({
   orders: [],
   fills: [],
+  fillRisks: [],
   quotes: [],
   logs: [],
   selections: [],
@@ -64,6 +67,9 @@ function ingest(journal: Journal, events: JournalEvent[]): Journal {
         break
       case 'fill':
         j = { ...j, fills: append(j.fills, e) }
+        break
+      case 'fill_risk':
+        j = { ...j, fillRisks: append(j.fillRisks, e) }
         break
       case 'quote':
         j = { ...j, quotes: append(j.quotes, e) }

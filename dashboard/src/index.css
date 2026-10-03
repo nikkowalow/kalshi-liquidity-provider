@@ -339,3 +339,4 @@ tr.clickable { cursor: pointer; }
 button.bot-item:not(:disabled) { cursor: pointer; }
 button.bot-item:not(:disabled):hover { background: var(--hover); }
 .bot-item.on { background: var(--tint-2); }
+.st-input.locked { pointer-events: none; opacity: .6; }

@@ -34,10 +34,10 @@ from typing import Any, Protocol
 
 import httpx
 
-from kalshi_lp.config import Settings
+from kalshi_lp.config import Settings, budget_scaled
 from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.types import ZERO, Leg, Quote, Side
-from kalshi_lp.engine import budget
+from kalshi_lp.engine import budget, fill_records
 from kalshi_lp.engine.executor import ExecutionReport, OrderExecutor
 from kalshi_lp.engine.payouts import PayoutTracker
 from kalshi_lp.engine.queue import queue_report
@@ -120,6 +120,8 @@ class LiquidityBot:
         self.feed = feed
         self.state = feed.state
         self.state.listeners.append(self.journal.listener)
+        settings = budget_scaled(settings)  # load_settings did already; settings built in code too
+        self.settings = settings
         self.engine = QuoteEngine(settings.quoting, settings.risk.max_position_per_market)
         self.selector = MarketSelector(
             client,
@@ -174,6 +176,8 @@ class LiquidityBot:
         self._entries: dict[str, Entry] = {}  # open positions' average entry (from fills)
         self._unwinding: dict[str, dict[str, Any]] = {}  # passive exits resting now
         self._live_risk: dict[str, FillRisk] = {}  # fill risk of the orders resting now
+        # Fill risk each market was picked with (for the fill records), carried over restarts.
+        self._entry_risk: dict[str, dict[str, Any]] = dict(prev.get("entry_risk") or {})
         self._selected_at: dict[str, float] = {}  # ticker -> monotonic time it was selected
         self._sizes: dict[str, Decimal] = {}  # auto sizing, per market
         self._reselect_soon = False  # a market got paused: re-rank early
@@ -188,7 +192,58 @@ class LiquidityBot:
     def _count_fills(self, kind: str, data: dict[str, Any]) -> None:
         if kind == "fill":
             self.fills_total += 1
+            self._record_fill_risk(data)  # before the fill changes the resting orders' risk
             self._note_entry(data)
+
+    async def _backfill_fill_records(self) -> None:
+        """Give earlier fills their fill-risk record (what the bot estimated at the time)."""
+        path = getattr(self.journal, "dir", None)
+        if path is None:
+            return
+        try:
+            records = await asyncio.to_thread(fill_records.backfill, path / "events.jsonl")
+        except OSError as exc:
+            log.warning("fill risk backfill skipped: %s", exc)
+            return
+        for record in records:
+            self.journal.event("fill_risk", **record)
+        if records:
+            log.info("backfilled fill risk for %d earlier fill(s)", len(records))
+
+    def _record_fill_risk(self, fill: dict[str, Any]) -> None:
+        """Journal the fill risk this market was entered with and had right before this fill."""
+        ticker = fill.get("ticker")
+        if fill.get("is_taker") or ticker not in self.markets:
+            return  # our own exits, or a market the bot isn't quoting (a manual trade)
+        now = time.time()
+        live = self._live_risk.get(ticker)
+        if live is not None:
+            quotes = self._resting_quotes(ticker)
+            at_fill: dict[str, Any] | None = {
+                "ts": now,
+                "basis": "live",
+                "events_per_day": live.hits_per_day,
+                "fills_per_day": live.fills_per_day,
+                "cost_per_day": live.cost_per_day,
+                "size": sum((q.size for q in quotes.values()), ZERO) or None,
+                "approx": False,
+            }
+        elif ticker in self._selected:
+            c = self._selected[ticker]
+            at_fill = fill_records.estimate(
+                {**_fill_risk_json(c), "size": c.size}, now, "selection"
+            )
+        else:
+            at_fill = None
+        self.journal.event(
+            "fill_risk",
+            fill_ts=now,
+            order_id=fill.get("order_id"),
+            ticker=ticker,
+            entry=self._entry_risk.get(ticker),
+            at_fill=at_fill,
+            backfilled=False,
+        )
 
     def _note_entry(self, fill: dict[str, Any]) -> None:
         """Track each open position's average entry price, for passive exits."""
@@ -350,6 +405,8 @@ class LiquidityBot:
                 s.risk.order_group_contracts_limit,
             )
 
+        if not s.dry_run:
+            await self._backfill_fill_records()
         await self.reselect()
         await self.feed.start(self.markets)
 
@@ -502,6 +559,14 @@ class LiquidityBot:
                 self.reduce_only.add(market.ticker)
         for c in candidates:
             self._selected[c.ticker] = c
+            if c.ticker not in self._entry_risk:  # entering: what fill risk it was picked with
+                entry = fill_records.estimate(
+                    {**_fill_risk_json(c), "size": c.size}, time.time(), "selection"
+                )
+                if entry is not None:
+                    self._entry_risk[c.ticker] = entry
+        for ticker in set(self._entry_risk) - set(self.markets):
+            del self._entry_risk[ticker]  # left the market: a later entry starts over
         now = time.monotonic()  # when each market got its slot (for min_hold_seconds)
         self._selected_at = {t: self._selected_at.get(t, now) for t in self.markets}
 
@@ -1328,21 +1393,34 @@ class LiquidityBot:
         async with self._lock:  # no quoting (or its own exits) in between
             return await self.flatten_all(force=True)
 
-    def set_max_capital(self, value: Decimal) -> Decimal | None:
+    async def set_max_capital(self, value: Decimal) -> Decimal | None:
         """Change the capital budget until the bot restarts; returns the old one.
 
-        Re-ranks at once (the budget decides how many markets get funded) and
-        resizes every market's quotes on the next requote.
+        With risk.scale_with_budget, the limits sized from the budget (loss cap per side,
+        order sizes, exposure, session loss, the exchange fill limit) move with it at once.
+        Re-ranks at once (the budget decides how many markets get funded) and resizes every
+        market's quotes on the next requote.
         """
         old = self.settings.risk.max_capital
         risk = self.settings.risk.model_copy(update={"max_capital": value})
-        self.settings = self.settings.model_copy(update={"risk": risk})
-        self.selector.max_capital = value
-        self._config_json = self.settings.model_dump(mode="json")
+        self._use_settings(budget_scaled(self.settings.model_copy(update={"risk": risk})))
+        group, limit = self.executor.order_group_id, self.settings.risk.order_group_contracts_limit
+        if group and not self.settings.dry_run and limit > 0:
+            await self.client.update_order_group_limit(group, limit)
         self._budget_binding = False
         self.request_rescan()
         self.state.mark_dirty(self.markets)
         return old
+
+    def _use_settings(self, settings: Settings) -> None:
+        """Switch the running bot to ``settings`` (same structure, new numbers)."""
+        self.settings = settings
+        self.engine.cfg = settings.quoting
+        self.engine.max_position = settings.risk.max_position_per_market
+        self.selector.quoting = settings.quoting
+        self.selector.max_capital = settings.risk.max_capital
+        self.risk.cfg = settings.risk
+        self._config_json = settings.model_dump(mode="json")
 
     # ----------------------------------------------------------------- journal
 
@@ -1482,6 +1560,7 @@ class LiquidityBot:
             "ledger": self.tracker.ledger(self.titles),
             "rewards_unattributed": self.tracker.unattributed,
             "fills_total": self.fills_total,
+            "entry_risk": self._entry_risk,
             "payouts": self.payouts.export() if self.payouts else None,
             "requotes_total": self._requotes_before + self.requotes,
         }

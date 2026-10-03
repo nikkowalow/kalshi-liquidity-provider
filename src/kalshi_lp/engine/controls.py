@@ -78,7 +78,7 @@ class BotControls:
                 raise ControlError(
                     f"${value} is more than the account holds (${ceiling:.2f} cash and in use)"
                 )
-        old = self.bot.set_max_capital(value)
+        old = await self.bot.set_max_capital(value)
         before = f"${old}" if old is not None else "no limit"
         log.warning(
             "max_capital %s -> $%s (from the dashboard, until restart; to keep it, set "
@@ -86,7 +86,17 @@ class BotControls:
             before,
             value,
         )
-        return f"budget {before} -> ${value} until restart (keep it: risk.max_capital in config)"
+        scaled = ""
+        if self.bot.settings.risk.scale_with_budget:
+            q, r = self.bot.settings.quoting, self.bot.settings.risk
+            scaled = (
+                f"; now ${q.max_loss_per_fill}/side, up to {q.max_size} contracts, "
+                f"session loss limit ${r.max_session_loss}"
+            )
+        return (
+            f"budget {before} -> ${value}{scaled} until restart "
+            "(keep it: risk.max_capital in config)"
+        )
 
     async def stop(self) -> str:
         log.warning("stop requested from the dashboard")
@@ -104,6 +114,8 @@ class BotControls:
             "schema": config_edit.schema(),
             "values": config_edit.values(self.config_path),
             "running": config_edit.sections(self.bot.settings),
+            # Set from the budget (risk.scale_with_budget): what they come to with the saved file.
+            "derived": config_edit.derived(self.config_path),
         }
 
     async def set_config(self, changes: dict[str, Any]) -> str:

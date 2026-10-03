@@ -6,7 +6,7 @@ import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { useFreshKeys } from '../lib/useFreshKeys'
 import { type RoundTrip, roundTrips } from '../lib/roundTrips'
 import { useVirtualRows } from '../lib/useVirtualRows'
-import type { FillEvent, LogEvent, MarketsEvent, OrderRow } from '../types'
+import type { FillEvent, FillRiskEvent, LogEvent, MarketsEvent, OrderRow, RiskEstimate } from '../types'
 import { competitionRoom } from '../lib/competition'
 import { CompetitionTag } from './CompetitionTag'
 import { FillsCell, NetCell } from './FillRiskCells'
@@ -143,7 +143,7 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
           </table>
         )}
       </div>
-      <FillsBlock fills={journal.fills} />
+      <FillsBlock fills={journal.fills} risks={journal.fillRisks} />
     </section>
   )
 }
@@ -151,7 +151,13 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
 const fillKey = (f: FillEvent) => `${f.ts}-${f.order_id}-${f.count}`
 
 /** Fills only change when one arrives: memoized, and only visible rows are drawn. */
-const FillsBlock = memo(function FillsBlock({ fills }: { fills: FillEvent[] }) {
+const FillsBlock = memo(function FillsBlock({
+  fills,
+  risks,
+}: {
+  fills: FillEvent[]
+  risks: FillRiskEvent[]
+}) {
   const [tab, setTab] = useState<'recent' | 'history'>('recent')
   const trips = useMemo(() => roundTrips(fills), [fills])
   const closed = trips.filter((t) => t.pnl !== null)
@@ -183,12 +189,47 @@ const FillsBlock = memo(function FillsBlock({ fills }: { fills: FillEvent[] }) {
   return (
     <>
       <PanelHeader title="Fills" help="panel:fills" note={note} tools={tools} />
-      {tab === 'recent' ? <RecentFills fills={fills} /> : <TradeHistory trips={trips} />}
+      {tab === 'recent' ? <RecentFills fills={fills} risks={risks} /> : <TradeHistory trips={trips} />}
     </>
   )
 })
 
-function RecentFills({ fills: all }: { fills: FillEvent[] }) {
+/** Each fill's fill-risk record: the one for its order, recorded within a minute of it. */
+function riskFor(f: FillEvent, byOrder: Map<string, FillRiskEvent[]>): FillRiskEvent | undefined {
+  const records = byOrder.get(`${f.ticker}|${f.order_id}`) ?? []
+  return records.find((r) => Math.abs(r.fill_ts - f.ts) < 60) ?? records[0]
+}
+
+const dailyChance = (e: RiskEstimate | null | undefined) =>
+  e?.events_per_day == null ? null : 1 - Math.exp(-e.events_per_day)
+
+function RiskCell({ e }: { e: RiskEstimate | null | undefined }) {
+  const chance = dailyChance(e)
+  if (!e || chance === null) return <td className="dim">—</td>
+  const title = [
+    `${(e.events_per_day ?? 0).toFixed(2)} fill events/day · ${qty(e.fills_per_day)} contracts/day · ${usd(e.cost_per_day)}/day`,
+    `order size ${qty(e.size)} · ${e.basis === 'live' ? 'live: the orders resting then' : 'the quote planned at selection'}`,
+    `estimated ${new Date(e.ts * 1000).toLocaleString()}`,
+    e.approx ? 'approx: old estimate, from contracts/day ÷ order size (a lower bound)' : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return (
+    <td className={chance >= 0.5 ? 'neg' : chance >= 0.15 ? 'yl' : 'pos'} title={title}>
+      {(chance * 100).toFixed(1)}%{e.approx ? '≈' : ''}
+    </td>
+  )
+}
+
+function RecentFills({ fills: all, risks }: { fills: FillEvent[]; risks: FillRiskEvent[] }) {
+  const byOrder = useMemo(() => {
+    const m = new Map<string, FillRiskEvent[]>()
+    for (const r of risks) {
+      const k = `${r.ticker}|${r.order_id}`
+      m.set(k, [...(m.get(k) ?? []), r])
+    }
+    return m
+  }, [risks])
   const fillSort = useSort('fills')
   const fills = useMemo(
     () => sortRows([...all].reverse(), FILL_ACCESSORS, fillSort.state),
@@ -224,14 +265,16 @@ function RecentFills({ fills: all }: { fills: FillEvent[] }) {
               <SortTh k="Pos" sorter={fillSort} help="fill:Pos after">
                 Pos after
               </SortTh>
+              <th data-help="fill:risk entry">Risk @entry</th>
+              <th data-help="fill:risk fill">Risk @fill</th>
             </tr>
           </thead>
           <tbody>
-            <PadRow height={win.padTop} cols={6} />
+            <PadRow height={win.padTop} cols={8} />
             {fills.slice(win.start, win.end).map((f) => (
-              <FillLine key={fillKey(f)} f={f} fresh={freshFills.has(fillKey(f))} />
+              <FillLine key={fillKey(f)} f={f} risk={riskFor(f, byOrder)} fresh={freshFills.has(fillKey(f))} />
             ))}
-            <PadRow height={win.padBottom} cols={6} />
+            <PadRow height={win.padBottom} cols={8} />
           </tbody>
         </table>
       )}
@@ -329,7 +372,15 @@ function TradeHistory({ trips: all }: { trips: RoundTrip[] }) {
   )
 }
 
-const FillLine = memo(function FillLine({ f, fresh }: { f: FillEvent; fresh: boolean }) {
+const FillLine = memo(function FillLine({
+  f,
+  risk,
+  fresh,
+}: {
+  f: FillEvent
+  risk: FillRiskEvent | undefined
+  fresh: boolean
+}) {
   return (
     <tr className={fresh ? 'row-fill' : undefined}>
       <td className="l dim">
@@ -349,6 +400,16 @@ const FillLine = memo(function FillLine({ f, fresh }: { f: FillEvent; fresh: boo
       <td className={sideClass(f.side)}>{px(f.price)}</td>
       <td className={sideClass(f.side)}>{qty(f.count)}</td>
       <td>{qty(f.post_position)}</td>
+      {f.is_taker ? (
+        <td className="dim" colSpan={2}>
+          exit
+        </td>
+      ) : (
+        <>
+          <RiskCell e={risk?.entry} />
+          <RiskCell e={risk?.at_fill} />
+        </>
+      )}
     </tr>
   )
 })

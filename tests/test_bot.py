@@ -599,3 +599,39 @@ async def test_live_fill_risk_uses_the_orders_resting_now(exchange: FakeExchange
     feed.sync()
     await bot.refresh_live_fill_risk()
     assert T not in bot._live_risk
+
+
+async def test_a_new_budget_rescales_the_running_bot(exchange: FakeExchange) -> None:
+    bot, _ = await started(
+        exchange,
+        quoting={"auto_size": True},
+        risk={"max_capital": 100, "scale_with_budget": True, "order_group_contracts_limit": 10},
+    )
+    bot.executor.order_group_id = "group-1"
+    assert bot.settings.quoting.max_loss_per_fill == D("47.50")  # 100 x 0.95 / (1 x 2)
+    await bot.set_max_capital(D(200))
+    assert bot.settings.quoting.max_loss_per_fill == D("95.00")
+    assert bot.engine.cfg.max_loss_per_fill == D("95.00")  # the quote engine uses it
+    assert bot.risk.cfg.max_session_loss == D("190.00")  # and the risk limits
+    assert exchange.group_limits == [bot.settings.risk.order_group_contracts_limit]
+
+
+async def test_each_fill_records_its_fill_risk(exchange: FakeExchange, tmp_path) -> None:
+    import json
+
+    from kalshi_lp.journal import RunJournal
+
+    journal = RunJournal(tmp_path, "demo", "live")
+    feed = FakeFeed(exchange)
+    bot = LiquidityBot(settings(), exchange, feed=feed, journal=journal)  # type: ignore[arg-type]
+    await bot.startup()
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    bot._count_fills("fill", {"ticker": T, "order_id": bid.order_id, "is_taker": False})
+    bot._count_fills("fill", {"ticker": "MANUAL-1", "order_id": "m", "is_taker": False})
+    journal.close()
+    lines = (tmp_path / "demo-live" / "events.jsonl").read_text().splitlines()
+    records = [r for r in map(json.loads, lines) if r["type"] == "fill_risk"]
+    assert [(r["ticker"], r["order_id"], r["backfilled"]) for r in records] == [
+        (T, bid.order_id, False)  # the manual trade in another market gets none
+    ]
