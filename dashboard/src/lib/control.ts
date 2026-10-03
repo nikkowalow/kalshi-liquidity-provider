@@ -1,5 +1,5 @@
 /** The bot's control actions (POST /api/control/<action>; see src/kalshi_lp/engine/controls.py). */
-export type Action = 'pause' | 'resume' | 'flatten' | 'rescan' | 'budget' | 'stop'
+export type Action = 'pause' | 'resume' | 'flatten' | 'rescan' | 'budget' | 'stop' | 'config' | 'restart'
 
 /** Press a button on the bot. Resolves to the bot's one-line answer; rejects with its refusal. */
 export async function sendControl(

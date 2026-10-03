@@ -89,9 +89,11 @@ ENDPOINTS = {
     "/api/metrics": "totals history, evenly thinned (?points=2000)",
     "/api/scan": "the market scanner: the best markets by $/day at a fixed size (read-only)",
     "/api/ws": "WebSocket: a hello (state, events, metrics), then events and snapshots live",
-    "/api/control/<action>": "POST with the token: pause, resume, flatten, rescan, budget, stop",
+    "/api/config": "the editable settings: file values, running values, schema",
+    "/api/control/<action>": "POST with the token: pause, resume, flatten, rescan, budget, stop, "
+    "config ({changes: {section.setting: value}}), restart",
 }
-ACTIONS = ("pause", "resume", "flatten", "rescan", "budget", "stop")
+ACTIONS = ("pause", "resume", "flatten", "rescan", "budget", "stop", "config", "restart")
 TOKEN_FILE = "api-token"
 
 
@@ -104,6 +106,9 @@ class Controls(Protocol):
     async def rescan(self) -> str: ...
     async def set_budget(self, max_capital: Decimal) -> str: ...
     async def stop(self) -> str: ...
+    def config(self) -> dict[str, Any]: ...
+    async def set_config(self, changes: dict[str, Any]) -> str: ...
+    async def restart(self) -> str: ...
 
 
 NOT_BUILT = """<!doctype html><title>KLP Terminal</title>
@@ -307,6 +312,7 @@ class DashboardApi:
         app.router.add_get("/api/events", self._events)
         app.router.add_get("/api/metrics", self._metrics)
         app.router.add_get("/api/scan", self._scan)
+        app.router.add_get("/api/config", self._config)
         app.router.add_get("/api/ws", self._ws)
         app.router.add_post("/api/control/{action}", self._control)
         app.router.add_get("/api/{rest:.*}", self._not_found)
@@ -359,6 +365,14 @@ class DashboardApi:
         lines = self.recent.lines(request.query.get("type"), limit)
         return web.Response(text="[" + ",".join(lines) + "]", content_type="application/json")
 
+    async def _config(self, _: web.Request) -> web.Response:
+        if self.controls is None:
+            return _refuse(404, "the bot's controls are switched off (api.controls)")
+        try:
+            return web.json_response(self.controls.config())
+        except ControlError as exc:
+            return _refuse(400, str(exc))
+
     async def _scan(self, _: web.Request) -> web.Response:
         return web.Response(text=self.scan or "null", content_type="application/json")
 
@@ -392,6 +406,8 @@ class DashboardApi:
             try:
                 if action == "budget":
                     message = await self.controls.set_budget(await _max_capital(request))
+                elif action == "config":
+                    message = await self.controls.set_config(await _changes(request))
                 else:
                     message = await getattr(self.controls, action)()
             except ControlError as exc:
@@ -496,6 +512,17 @@ def _is_local(host: str | None) -> bool:
 
 def _refuse(status: int, error: str) -> web.Response:
     return web.json_response({"ok": False, "error": error}, status=status)
+
+
+async def _changes(request: web.Request) -> dict[str, Any]:
+    """The settings from a ``{"changes": {"risk.max_capital": 300}}`` body."""
+    try:
+        changes = (await request.json())["changes"]
+    except (ValueError, KeyError, TypeError):
+        raise ControlError('send JSON like {"changes": {"risk.max_capital": 300}}') from None
+    if not isinstance(changes, dict):
+        raise ControlError('"changes" must map "section.setting" to a value')
+    return changes
 
 
 async def _max_capital(request: web.Request) -> Decimal:

@@ -29,9 +29,12 @@ const COLUMNS: [label: string, align?: 'l'][] = [
   ['Fills/d'],
   ['Net $/h'],
   ['Share Y/N'],
-  ['Rank Y/N', 'l'],
+  ['Q pos Y', 'l'],
+  ['Q pos N', 'l'],
   ['Earned'],
   ['$/h'],
+  ['$/d'],
+  ['Mix', 'l'],
   ['Paying'],
   ['Flags', 'l'],
 ]
@@ -51,11 +54,9 @@ const add = (a: number | null | undefined, b: number | null | undefined) =>
   a == null && b == null ? null : (a ?? 0) + (b ?? 0)
 
 function accessors(ordersByTicker: Map<string, OrderRow[]>): Accessors<MarketRow> {
-  const bestRank = (m: MarketRow) => {
-    const ranks = (ordersByTicker.get(m.ticker) ?? [])
-      .map((o) => o.ahead_total)
-      .filter((r): r is number => r !== null)
-    return ranks.length ? Math.min(...ranks) + 1 : null
+  const bestRank = (leg: 'yes' | 'no') => (m: MarketRow) => {
+    const o = sideRank(ordersByTicker.get(m.ticker) ?? [], leg)
+    return o?.ahead_total == null ? null : o.ahead_total + 1
   }
   return {
     Ticker: (m) => m.ticker,
@@ -74,31 +75,46 @@ function accessors(ordersByTicker: Map<string, OrderRow[]>): Accessors<MarketRow
     'Fills/d': (m) => m.est_fills_per_day,
     'Net $/h': (m) => m.net_daily_reward,
     'Share Y/N': (m) => add(m.quotes.yes?.share, m.quotes.no?.share),
-    'Rank Y/N': bestRank,
+    'Q pos Y': bestRank('yes'),
+    'Q pos N': bestRank('no'),
     Earned: (m) => m.earned,
     '$/h': (m) => m.rate_per_hour,
+    '$/d': (m) => m.rate_per_hour,
+    Mix: (m) => m.rate_per_hour,
     Paying: (m) => (m.snapshots ? m.paying_snapshots / m.snapshots : null),
     Flags: flagRank,
   }
 }
 
+/** Our quote; why the bot priced it there (or isn't quoting) is in the hover help. */
 function QuoteCell({ q, cls }: { q?: LegQuote; cls: 'bid' | 'ask' }) {
   if (!q) return <span className="dim">—</span>
-  const reason = (
-    <span className="dim help-u" data-help={`reason:${q.reason}`}>
-      {q.reason}
+  if (q.price === null) {
+    return (
+      <span className="dim help-u" data-help={`reason:${q.reason}`}>
+        —
+      </span>
+    )
+  }
+  return (
+    <span className={cls} data-help={`reason:${q.reason}`}>
+      <Flash value={`${q.size}@${q.price}`}>
+        {qty(q.size)}@{px(q.price)}
+      </Flash>
     </span>
   )
-  if (q.price === null) return <span className="dim">— {reason}</span>
+}
+
+/** This market's share of the total $/h across markets, as a small bar. */
+function MixBar({ share }: { share: number | null }) {
+  if (share === null) return <span className="dim">—</span>
   return (
-    <>
-      <span className={cls}>
-        <Flash value={`${q.size}@${q.price}`}>
-          {qty(q.size)}@{px(q.price)}
-        </Flash>
-      </span>{' '}
-      {reason}
-    </>
+    <span className="mini-mix" data-help="mix:bar">
+      <span className="mini-mix-track">
+        <span className="mini-mix-bar" style={{ width: `${(share * 100).toFixed(1)}%` }} />
+      </span>
+      <span className="mini-mix-pct">{(share * 100).toFixed(0)}%</span>
+    </span>
   )
 }
 
@@ -149,13 +165,14 @@ interface RowProps {
   m: MarketRow
   orders: OrderRow[]
   fresh: boolean
+  share: number | null // of the total $/h across markets (null: not earning)
   sig: string // everything the row shows; unchanged signature = skip re-rendering it
   onSelect: (ticker: string) => void // stable (a state setter): left out of the memo check
 }
 
-const Row = memo(RowView, (a, b) => a.sig === b.sig && a.fresh === b.fresh)
+const Row = memo(RowView, (a, b) => a.sig === b.sig && a.fresh === b.fresh && a.share === b.share)
 
-function RowView({ m, orders, fresh, onSelect }: RowProps) {
+function RowView({ m, orders, fresh, share, onSelect }: RowProps) {
   const b = m.book
   const spread = b && b.bid !== null && b.ask !== null ? b.ask - b.bid : null
   const { yes, no } = m.quotes
@@ -227,16 +244,17 @@ function RowView({ m, orders, fresh, onSelect }: RowProps) {
           <span className="ask">{noShare}</span>
         </Flash>
       </td>
-      <td className="l">
-        {yesRank ? <RankBadge o={yesRank} /> : <span className="dim">—</span>}
-        <span className="dim"> · </span>
-        {noRank ? <RankBadge o={noRank} /> : <span className="dim">—</span>}
-      </td>
+      <td className="l">{yesRank ? <RankBadge o={yesRank} /> : <span className="dim">—</span>}</td>
+      <td className="l">{noRank ? <RankBadge o={noRank} /> : <span className="dim">—</span>}</td>
       <td className="pos">
         <Flash value={m.earned}>{usd(m.earned, 4)}</Flash>
       </td>
       <td>
         <Flash value={m.rate_per_hour}>{usd(m.rate_per_hour, 3)}</Flash>
+      </td>
+      <td>{usd(m.rate_per_hour * 24)}</td>
+      <td className="l">
+        <MixBar share={share} />
       </td>
       <td className="dim">{paying === null ? '—' : pct(num(paying))}</td>
       <td className="l">
@@ -267,6 +285,7 @@ export function MarketsTable({
     sorter.state,
   )
   const fresh = useFreshKeys(markets.map((m) => m.ticker))
+  const totalRate = all.reduce((sum, m) => sum + (m.rate_per_hour > 0 ? m.rate_per_hour : 0), 0)
   return (
     <Panel
       title="Markets"
@@ -319,6 +338,7 @@ export function MarketsTable({
                 m={m}
                 orders={byTicker.get(m.ticker) ?? []}
                 fresh={fresh.has(m.ticker)}
+                share={totalRate > 0 && m.rate_per_hour > 0 ? m.rate_per_hour / totalRate : null}
                 sig={JSON.stringify(m) + JSON.stringify(byTicker.get(m.ticker))}
                 onSelect={onSelect}
               />

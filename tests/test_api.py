@@ -47,6 +47,15 @@ class FakeControls:
     async def stop(self) -> str:
         return await self._act("stop")
 
+    def config(self) -> dict[str, object]:
+        return {"values": {"risk": {"max_capital": 250}}}
+
+    async def set_config(self, changes: dict[str, object]) -> str:
+        return await self._act("config", changes)
+
+    async def restart(self) -> str:
+        return await self._act("restart")
+
 
 @pytest.fixture
 def journal(tmp_path):
@@ -276,6 +285,24 @@ async def test_budget_takes_json_and_reports_refusals(journal) -> None:
         )
         assert refused.status == 400
         assert await refused.json() == {"ok": False, "error": "too much"}
+
+
+async def test_settings_are_read_freely_but_saved_with_the_token(journal) -> None:
+    controls = FakeControls()
+    api = DashboardApi(journal, ApiConfig(port=0, static_dir=None), controls)
+    async with serve(api) as client:
+        assert (await get_json(client, "/api/config"))["values"]["risk"]["max_capital"] == 250
+        body = {"changes": {"risk.max_capital": 300}}
+        assert (await client.post("/api/control/config", json=body)).status == 401
+        ok = await client.post("/api/control/config", headers=auth(api), json=body)
+        assert ok.status == 200
+        bad = await client.post("/api/control/config", headers=auth(api), json={"x": 1})
+        assert bad.status == 400 and "changes" in (await bad.json())["error"]
+        assert (await client.post("/api/control/restart", headers=auth(api))).status == 200
+    assert controls.calls == [("config", {"risk.max_capital": 300}), ("restart", None)]
+    off = DashboardApi(journal, ApiConfig(port=0, static_dir=None))  # controls switched off
+    async with serve(off) as client:
+        assert (await client.get("/api/config")).status == 404
 
 
 async def test_one_action_at_a_time(journal) -> None:

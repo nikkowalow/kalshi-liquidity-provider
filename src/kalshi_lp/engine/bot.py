@@ -180,6 +180,7 @@ class LiquidityBot:
         self._last_reselect = float("-inf")
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
+        self.restart_requested = False  # stopped to come back with a re-read config
 
     def _count_fills(self, kind: str, data: dict[str, Any]) -> None:
         if kind == "fill":

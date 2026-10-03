@@ -2,6 +2,7 @@ import { type FormEvent, memo, useEffect, useState } from 'react'
 import { sendControl, type Action } from '../lib/control'
 import { usd } from '../lib/format'
 import type { ControlInfo } from '../types'
+import { SettingsModal } from './Settings'
 import { Stamp } from './Stamp'
 
 const ARM_MS = 4000 // a two-click button stays armed this long
@@ -31,6 +32,7 @@ export const Controls = memo(function Controls({ controls, live, heldSince, maxC
   const [busy, setBusy] = useState<Action | null>(null)
   const [note, setNote] = useState<Note | null>(null)
   const [draft, setDraft] = useState<string | null>(null) // budget being edited
+  const [settings, setSettings] = useState(false)
 
   useEffect(() => {
     if (!armed) return
@@ -131,6 +133,10 @@ export const Controls = memo(function Controls({ controls, live, heldSince, maxC
           {label('budget', `budget ${maxCapital != null ? usd(maxCapital) : 'none'}`)}
         </button>
       )}
+      <button type="button" disabled={!live} onClick={() => setSettings(true)} data-help="ctl:settings">
+        ⚙ settings
+      </button>
+      {settings && <SettingsModal token={controls.token} onClose={() => setSettings(false)} />}
       <button type="button" className={cls('stop', 'danger')} disabled={off} onClick={twoClick('stop')} data-help="ctl:stop">
         {label('stop', '⏻ stop')}
       </button>

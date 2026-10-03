@@ -9,14 +9,20 @@ when the request can't be carried out as asked.
     flatten  close every position in the bot's markets now
     rescan   re-rank markets now instead of at the next scheduled scan
     budget   change risk.max_capital until the bot restarts
-    stop     shut down as on Ctrl-C: cancel orders, close positions, exit
+    stop     shut down as on Ctrl-C: cancel orders (positions stay open), exit
+    config   save settings to the YAML config (see kalshi_lp.config_edit)
+    restart  stop, re-read the config, start again (open positions carry over)
 """
 
 from __future__ import annotations
 
 import logging
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
+from kalshi_lp import config_edit
+from kalshi_lp.config import ConfigError
 from kalshi_lp.engine.bot import LiquidityBot
 
 log = logging.getLogger(__name__)
@@ -29,8 +35,9 @@ class ControlError(Exception):
 
 
 class BotControls:
-    def __init__(self, bot: LiquidityBot):
+    def __init__(self, bot: LiquidityBot, config_path: Path | None = None):
         self.bot = bot
+        self.config_path = config_path  # the YAML the bot was started with (None: read-only)
 
     async def pause(self) -> str:
         if self.bot.held_since is not None:
@@ -84,4 +91,39 @@ class BotControls:
     async def stop(self) -> str:
         log.warning("stop requested from the dashboard")
         self.bot.stop()
-        return "stopping: cancelling orders, closing positions. Start it again from the terminal."
+        return (
+            "stopping: cancelling orders (positions stay open). Start it again from the terminal."
+        )
+
+    def config(self) -> dict[str, Any]:
+        """The editable settings: as the file has them, as the bot runs them, and their schema."""
+        if self.config_path is None:
+            raise ControlError("the bot wasn't started from a config file")
+        return {
+            "path": str(self.config_path),
+            "schema": config_edit.schema(),
+            "values": config_edit.values(self.config_path),
+            "running": config_edit.sections(self.bot.settings),
+        }
+
+    async def set_config(self, changes: dict[str, Any]) -> str:
+        if self.config_path is None:
+            raise ControlError("the bot wasn't started from a config file")
+        try:
+            changed = config_edit.apply(self.config_path, changes)
+        except ConfigError as exc:
+            raise ControlError(str(exc)) from exc
+        if not changed:
+            return "nothing changed"
+        log.warning(
+            "config %s changed from the dashboard: %s", self.config_path, ", ".join(changed)
+        )
+        return f"saved {len(changed)} setting(s) to {self.config_path.name}; restart to apply"
+
+    async def restart(self) -> str:
+        if self.config_path is None:
+            raise ControlError("the bot wasn't started from a config file")
+        log.warning("restart requested from the dashboard")
+        self.bot.restart_requested = True
+        self.bot.stop()
+        return "restarting with the saved config: back in a few seconds (open positions carry over)"

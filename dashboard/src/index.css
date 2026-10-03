@@ -254,24 +254,19 @@ tr.earning > td:first-child { border-left: 2px solid var(--green); }
 /* Log: a blinking cursor while tailing. */
 .cursor { color: var(--accent); animation: blink 1s steps(2, start) infinite; }
 
-/* Earnings mix: flat green bars sized by share of the total $/h. */
-.mix { padding: 5px 8px; display: grid; gap: 4px; }
-.mix-row { display: grid; grid-template-columns: 26px minmax(150px, 300px) 1fr 52px 78px; gap: 8px;
-           align-items: center; }
-.mix-rank { color: var(--muted); }
-.mix-row.leader .mix-rank { color: var(--yellow); }
-.mix-track { position: relative; height: 12px; overflow: hidden; border: 1px solid var(--grid);
-             background: color-mix(in oklab, var(--green) 7%, var(--bg)); }
-.mix-bar { position: absolute; left: 0; top: 0; bottom: 0; overflow: hidden;
-           background: var(--green); transition: width .4s ease-out; }
-.mix-pct { text-align: right; color: #fff; }
-.mix-rate { text-align: right; color: var(--green); }
+/* Markets table: each market's share of the total $/h as a small bar. */
+.mini-mix { display: inline-flex; align-items: center; gap: 4px; }
+.mini-mix-track { position: relative; width: 48px; height: 8px; overflow: hidden; border: 1px solid var(--grid);
+                  background: color-mix(in oklab, var(--green) 7%, var(--bg)); }
+.mini-mix-bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--green);
+                transition: width .4s ease-out; }
+.mini-mix-pct { color: var(--muted); font-size: 10px; min-width: 26px; text-align: right; }
 
 @media (prefers-reduced-motion: reduce) {
   .fl-up, .fl-down, .fl-chg, .row-new > td, table.row-new td, .row-fill > td, .pulse,
   .badge.live, .chart .live-dot, .tape-track, .spin, .rx .fl .led, .rec, .dots::after,
   .cursor { animation: none; }
-  .mix-bar { transition: none; }
+  .mini-mix-bar { transition: none; }
 }
 
 /* market detail popup (click a row in Markets) */
@@ -300,3 +295,33 @@ tr.clickable { cursor: pointer; }
 .md-progress span { position: relative; padding: 0 6px; font-size: 10px; line-height: 14px; }
 .md-ladder td.md-mine { font-weight: 700; background: var(--tint-2); }
 .md-why { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* settings popup (top bar: settings) */
+.md.st { display: flex; flex-direction: column; max-height: 92vh; text-transform: none; font-weight: 400;
+         color: var(--text); text-align: left; }
+.md.st .md-title { color: var(--accent); font-weight: 700; }
+.st-search { font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--line); padding: 1px 6px; width: 200px; }
+.st-body { display: grid; grid-template-columns: 150px 1fr; min-height: 0; flex: 1; }
+.st-nav { display: flex; flex-direction: column; gap: 3px; padding: 6px; border-right: 1px solid var(--line); overflow: auto; }
+.st-nav .chip { text-align: left; text-transform: uppercase; }
+.st-fields { overflow: auto; padding: 4px 8px; }
+.st-row { display: grid; grid-template-columns: 1fr 260px; gap: 12px; padding: 6px 4px; border-bottom: 1px solid var(--grid); }
+.st-row.edited { background: var(--tint-2); }
+.st-name b { color: var(--accent); margin-right: 6px; }
+.st-desc { color: var(--text); opacity: .8; margin-top: 2px; font-size: 11px; }
+.st-default { color: var(--muted); font-size: 10px; margin-top: 2px; }
+.st-input { display: flex; gap: 4px; align-items: flex-start; }
+.st-input input[type=text], .st-input select, .st-input textarea { font: inherit; width: 100%; background: var(--bg);
+  color: #fff; border: 1px solid var(--line); padding: 2px 6px; }
+.st-input textarea { resize: vertical; }
+.st-input input[type=checkbox] { margin-top: 4px; }
+.st-foot { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 8px;
+  border-top: 1px solid var(--line); background: var(--tint-1); }
+.st-buttons { display: flex; gap: 6px; }
+.st-buttons button { font: inherit; text-transform: uppercase; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); padding: 2px 8px; cursor: pointer; }
+.st-buttons button:disabled { opacity: .4; cursor: default; }
+.st-buttons button.go { color: var(--green); border-color: var(--green); }
+.st-buttons button.warn { color: var(--yellow); border-color: var(--yellow); }
+.st-buttons button.armed { background: var(--yellow); color: #000; }
+@media (max-width: 800px) { .st-body { grid-template-columns: 1fr; } .st-row { grid-template-columns: 1fr; } }

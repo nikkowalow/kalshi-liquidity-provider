@@ -1,7 +1,6 @@
 import { Blotter } from './components/Blotter'
 import { Charts } from './components/Charts'
 import { Controls } from './components/Controls'
-import { EarningsMix } from './components/EarningsMix'
 import { HelpLayer } from './components/HelpLayer'
 import { Kpis } from './components/Kpis'
 import { MarketDetail } from './components/MarketDetail'
@@ -75,7 +74,6 @@ export default function App() {
       <div className="grid">
         <MarketsTable markets={state?.markets ?? []} orders={state?.orders ?? []} onSelect={setSelected} />
         <Charts journal={journal} state={state} live={live} />
-        <EarningsMix state={state} />
         <Scanner scan={raw.scan} />
         <Blotter orders={journal.orders} fills={journal.fills} quotes={journal.quotes} />
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />

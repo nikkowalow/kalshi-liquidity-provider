@@ -14,7 +14,8 @@ export const HELP: Record<string, HelpEntry> = {
   "ctl:rescan": ["Rescan now", "Re-rank markets now instead of waiting for the next scheduled scan (loop.reselect_interval_seconds). The result shows in the log and the markets table within a few seconds."],
   "ctl:flatten": ["Flatten (two clicks)", "Close every position in the markets the bot has traded, now, with immediate-or-cancel orders that cross the book (paying the spread and taker fee). Retries a few times, reaching a little further each time. Quoting carries on afterwards; PAUSE first for a full exit. Positions you opened yourself in other markets are left alone."],
   "ctl:budget": ["Capital budget", "The real risk.max_capital: position cost plus cash in resting orders. Changing it re-ranks markets and resizes quotes at once. It lasts until the bot restarts; to keep it, set risk.max_capital in the config. Not the C× multiplier, which only changes what the dashboard displays."],
-  "ctl:stop": ["Stop the bot (two clicks)", "Shuts the bot down as Ctrl-C would: cancels its orders, closes positions, writes the final snapshot, and exits. Start it again from the terminal."],
+  "ctl:settings": ["Settings", "Every strategy and risk setting in the bot's YAML config, with what each one does. Save writes the file (only the changed lines; comments are kept, and the old version is saved as .bak). The bot reads it on restart: 'save & restart' does both in a few seconds, and open positions carry over. The environment, live/dry-run, account and dashboard server settings are left to the file."],
+  "ctl:stop": ["Stop the bot (two clicks)", "Shuts the bot down as Ctrl-C would: cancels its orders (open positions stay, and the next start picks them up), writes the final snapshot, and exits. Start it again from the terminal, or use settings → save & restart to restart without leaving the page."],
   "bar:link": ["Connection to the bot", "The dashboard gets its data straight from the running bot, over a WebSocket (the bot serves it: klp run, port 8050 by default). While the bot is stopped the page keeps showing what it last had and reconnects by itself as soon as the bot is back."],
 
   // KPIs
@@ -74,6 +75,8 @@ export const HELP: Record<string, HelpEntry> = {
     "Your $/day is roughly Program $/day × (YES share + NO share) ÷ 2."],
   "col:Earned": ["Earned", "The bot's estimate of rewards earned in this market, across all sessions."],
   "col:$/h": ["$/hour", "Your recent reward rate in this market, over roughly the last 10 minutes."],
+  "col:$/d": ["$/day", "The $/hour rate projected over 24 hours. Kalshi pays nothing for a period under $1."],
+  "col:Mix": ["Earnings mix", "This market's share of your total $/hour across all markets right now."],
   "col:Paying": ["Paying", "The share of scored seconds in which your orders earned something. Below 100% means some seconds paid nothing: a side of the book was under Target, your order was too deep in the queue, or you had no order resting."],
   "col:Flags": ["Flags", "Anything unusual about this market right now. Hover a flag for details."],
 
@@ -105,7 +108,6 @@ export const HELP: Record<string, HelpEntry> = {
   "scan:skip": ["Filtered out", "The bot's selection would skip this market whatever it pays: see the reason."],
   "chip:past": ["Past markets", "Show or hide markets the bot quoted earlier but isn't quoting now."],
   "blot:Reason": ["Reason", "Why the bot did it. reprice a -> b: the target price moved (the part in brackets is the strategy's reason and your estimated reward share there). new quote: nothing was resting on that side. stop quoting bid/ask: that side is switched off (e.g. position limit, thin book). shrink: fewer contracts wanted. top up a -> b: add an order at the same price to reach the wanted size, after a partial fill or when the size grew (e.g. a bigger budget); the resting order keeps its place in the queue. market paused / closes within / not selected / feed disconnected / shutting down: the whole market was pulled. shrunk ... to fit max_capital: the budget cut the order. Hover a cell for the full text."],
-  "panel:mix": ["Earnings mix", "Where your reward rate comes from right now. Each bar is one market's share of your total $/hour (the bot's estimate over roughly the last 10 minutes): a bar at 40% means that market earns 40% of everything you're earning. Sorted biggest first; the leader glows. Markets not earning at the moment aren't listed."],
   "mix:bar": ["Share of total $/h", "Width = this market's $/hour divided by your total $/hour across all markets."],
   "chip:window": ["Chart window", "How much time the charts show. 5M, 15M and 1H scroll with time and use a sample every second (collected while this page is open; older points come from the journal every 10s). 1D and ALL show the journal history across every session."],
   "bar:rx": ["Receiving", "The dashboard is receiving live snapshots from the bot, pushed over its WebSocket. The LED blinks each time one arrives, about once a second; orders and fills show up the moment they happen."],
@@ -149,7 +151,8 @@ export const HELP: Record<string, HelpEntry> = {
   "ord:Queue": ["At level", "Contracts ahead of us at our own price, as reported by Kalshi's queue-position endpoint (time priority). 'back?' means the bot hasn't fetched it yet and assumes we're at the back of the line."],
   "ord:Credit": ["Full credit", "YES: the order is at or above the program's reference price, so it earns full credit. DISC: it's below the reference price, so its credit is discounted by the discount factor for each tick below."],
   "ord:Age": ["Age", "How long ago the bot placed (or first saw) this order. Older orders have moved up the queue as orders ahead of them filled or cancelled."],
-  "col:Rank Y/N": ["Rank YES / NO", "Queue rank of our best order on the YES side and on the NO side, out of the program's Target Size. Green means fully inside the top N contracts, which is where rewards are paid. Hover a badge for details."],
+  "col:Q pos Y": ["Queue position, YES", "Queue rank of our best YES bid, out of the program's Target Size. Green means fully inside the top N contracts, which is where rewards are paid. Hover a badge for details."],
+  "col:Q pos N": ["Queue position, NO", "Queue rank of our best NO bid (our YES ask), out of the program's Target Size. Green means fully inside the top N contracts, which is where rewards are paid. Hover a badge for details."],
   "rank:in": ["Inside Target Size", "The whole order is within the first Target Size contracts on its side, so it counts toward rewards every second, as long as both sides of the market reach Target Size."],
   "rank:partial": ["Partly inside", "Only part of this order is within the first Target Size contracts on its side. The rest earns nothing until orders ahead fill or cancel."],
   "rank:out": ["Outside Target Size", "More than Target Size contracts sit ahead of this order, so it earns no reward right now. On its next requote (within seconds) the bot moves it up to the lowest price that gets it back inside, as long as that stays within its safety limits (cushion, distance from mid, never crossing); if no such price exists, it pulls the order, since it would only carry fill risk."],

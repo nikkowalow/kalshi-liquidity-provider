@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.7",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
+    "ruamel.yaml>=0.18",  # edits the config from the dashboard, keeping its comments
     "websockets>=13.0",
 ]
 

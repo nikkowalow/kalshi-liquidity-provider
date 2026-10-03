@@ -17,6 +17,7 @@ import signal
 import sys
 from collections.abc import Callable, Coroutine
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from kalshi_lp import __version__
@@ -220,6 +221,21 @@ async def cmd_cancel(settings: Settings, args: argparse.Namespace) -> int:
 
 
 async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
+    """Run the bot; a restart from the dashboard re-reads the config and runs it again."""
+    while True:
+        code, restart = await _run_once(settings, args)
+        if not restart:
+            return code
+        try:
+            settings = load_settings(args.config, getattr(args, "overrides", None), dotenv=True)
+        except (ConfigError, ValueError) as exc:
+            log.critical("restart cancelled: the config no longer loads (%s)", exc)
+            return 1
+        log.warning("restarting with %s", args.config)
+
+
+async def _run_once(settings: Settings, args: argparse.Namespace) -> tuple[int, bool]:
+    """One run of the bot: (exit code, whether a restart was asked for)."""
     signer = build_signer(settings)
     async with build_client(settings, signer) as client:
         journal = RunJournal(
@@ -232,7 +248,7 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
         bot = LiquidityBot(settings, client, signer=signer, journal=journal)
         api = None
         if settings.api.enabled:
-            controls = BotControls(bot) if settings.api.controls else None
+            controls = BotControls(bot, Path(args.config)) if settings.api.controls else None
             api = DashboardApi(journal, settings.api, controls)
         if api is not None:
             await api.start()
@@ -248,8 +264,8 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
                 await api.stop()  # after the final snapshot, so the dashboard shows how it ended
         if bot.risk.halted:
             log.critical("bot halted: %s", bot.risk.halt_reason)
-            return 2
-    return 0
+            return 2, False
+    return 0, bot.restart_requested
 
 
 COMMANDS: dict[str, Callable[[Settings, argparse.Namespace], Coroutine[Any, Any, int]]] = {
@@ -320,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     overrides: dict[str, Any] = {}
     if getattr(args, "live", False):
         overrides["dry_run"] = False
+    args.overrides = overrides  # re-applied when the dashboard restarts the bot
     try:
         settings = load_settings(args.config, overrides, dotenv=True)
     except (ConfigError, ValueError) as exc:
