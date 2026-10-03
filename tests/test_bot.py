@@ -410,8 +410,9 @@ async def test_start_up_keeps_positions_from_the_last_run_and_exits_them(
 async def test_auto_size_charges_loss_capped_legs_only_what_they_lock(
     exchange: FakeExchange,
 ) -> None:
-    # Quotes rest at 0.40 (YES) and 0.50 (NO). A $2 cap allows 5 YES and 4 NO, which lock
-    # 5 x 0.40 + 4 x 0.50 = $4 at any size: $5 funds the full 20, not $5 / $0.90 = 5.
+    # Quotes rest at 0.40 (YES) and 0.49 (NO, a 0.51 YES ask). A $2 cap allows 5 YES and 4
+    # NO, which lock 5 x 0.40 + 4 x 0.49 = $3.96 at any size: $5 funds the full 20, not
+    # $5 / $0.90 = 5.
     bot, feed = await started(
         exchange,
         quoting={
@@ -424,7 +425,7 @@ async def test_auto_size_charges_loss_capped_legs_only_what_they_lock(
     )
     await step(bot, feed)
     assert bot._sizes[T] == 20
-    assert resting(exchange) == [(Side.ASK, D("0.50"), D(4)), (Side.BID, D("0.40"), D(5))]
+    assert resting(exchange) == [(Side.ASK, D("0.51"), D(4)), (Side.BID, D("0.40"), D(5))]
     assert bot.capital_in_use() <= 5
 
 

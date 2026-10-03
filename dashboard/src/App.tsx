@@ -13,6 +13,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { num } from './lib/format'
 import { scaleJournal, scaleSamples, scaleState } from './lib/scale'
 import { useJournal } from './lib/useJournal'
+import { OpenMarketContext } from './lib/openMarket'
+import type { MarketRow } from './types'
 import { useMultiplier } from './lib/useMultiplier'
 
 export default function App() {
@@ -43,7 +45,8 @@ export default function App() {
   // The market whose popup is open (looked up in each snapshot, so it stays live).
   const [selected, setSelected] = useState<string | null>(null)
   const closeDetail = useCallback(() => setSelected(null), [])
-  const detail = selected ? state?.markets.find((m) => m.ticker === selected) : undefined
+  // Any ticker opens the popup; one the bot never tracked gets a bare row (history still shows).
+  const detail = selected ? (state?.markets.find((m) => m.ticker === selected) ?? untracked(selected)) : undefined
   const payoutMinimum =
     num((state?.config as { selection?: { payout_minimum?: unknown } } | undefined)?.selection?.payout_minimum) ?? 1
   const rejects = useMemo(
@@ -52,7 +55,7 @@ export default function App() {
   )
 
   return (
-    <>
+    <OpenMarketContext.Provider value={setSelected}>
       <TopBar
         runId={runId}
         link={link}
@@ -101,6 +104,32 @@ export default function App() {
         />
       )}
       <HelpLayer />
-    </>
+    </OpenMarketContext.Provider>
   )
+}
+
+/** A market the bot has no row for (e.g. from the scanner): just the ticker, nothing earned. */
+function untracked(ticker: string): MarketRow {
+  return {
+    ticker,
+    title: 'not tracked by the bot',
+    inactive: true,
+    close_time: null,
+    reduce_only: false,
+    paused: false,
+    near_close: false,
+    healthy: true,
+    book: null,
+    position: 0,
+    exposure: 0,
+    realized_pnl: 0,
+    fees: 0,
+    quotes: {},
+    reward: { per_day: 0, target_size: null, discount_factor: null },
+    earned: 0,
+    rate_per_hour: 0,
+    avg_score: 0,
+    snapshots: 0,
+    paying_snapshots: 0,
+  }
 }

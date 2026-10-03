@@ -205,13 +205,14 @@ def test_cushion_never_exceeds_full_credit_depth(quoting_cfg) -> None:
 
 def test_loss_cap_limits_what_one_fill_can_lose(quoting_cfg, reward) -> None:
     # YES bid at 0.40: a fill loses at most 0.40/contract, so $2 allows 5 contracts.
-    # NO bid at 0.50 (the YES ask): at most 0.50/contract, so 4.
+    # NO bid at 0.49 (a YES ask of 0.51): at most 0.49/contract, so 4. (Four contracts can't
+    # lift the full-credit price the way 20 would, so the deeper 0.49 earns as much as 0.50.)
     cfg = quoting_cfg.model_copy(update={"max_loss_per_fill": D(2)})
     d = quote(cfg, reward, WIDE)
     yes, no = d[Leg.YES].quote, d[Leg.NO].quote
     assert yes is not None and no is not None
     assert (yes.price, yes.size) == (D("0.40"), D(5))
-    assert (no.price, no.size) == (D("0.50"), D(4))
+    assert (no.price, no.size) == (D("0.51"), D(4))
     tiny = quoting_cfg.model_copy(update={"max_loss_per_fill": D("0.2")})
     assert quote(tiny, reward, WIDE)[Leg.YES].reason == "loss cap"  # not even one contract
 
@@ -299,3 +300,32 @@ def test_thin_book_is_left_alone(quoting_cfg) -> None:
     thin = make_book(yes=[("0.46", 50), ("0.45", 50)], no=[("0.50", 1200)])
     d = yes_leg(prod_like(quoting_cfg), thin, position=D(0))
     assert d.quote is not None and "into target" not in d.reason
+
+
+def test_prices_are_compared_at_the_loss_capped_size() -> None:
+    # A 150-contract bid at 0.59 would lift the full-credit price above the 597 resting at
+    # 0.57 and halve their credit; the 16 contracts the $10 loss cap allows can't. At that
+    # size 0.57 earns as much as 0.59, so the bot takes the deeper price (0.56 after the
+    # one-tick offset), not 0.59.
+    cfg = QuotingConfig(
+        placement="reward",
+        auto_size=True,
+        max_loss_per_fill=D(10),
+        max_size=D(150),
+        offset_ticks=1,
+        share_tolerance=D("0.4"),
+        min_cushion=D(100),
+    )
+    book = make_book(
+        yes=[("0.82", 1), ("0.80", 100), ("0.60", 60), ("0.57", 597), ("0.41", 2160)],
+        no=[("0.12", 50), ("0.11", 106), ("0.07", 68), ("0.05", 48), ("0.04", 15887)],
+    )
+    ctx = MarketContext(
+        market=make_market(),
+        book=book,
+        position=D(0),
+        reward=RewardParams(D(1000), D("0.5"), reward_per_day=D(100)),
+        size=D(150),
+    )
+    yes = QuoteEngine(cfg, D(150)).quote(ctx)[Leg.YES].quote
+    assert yes is not None and yes.price == D("0.56") and yes.size == 17

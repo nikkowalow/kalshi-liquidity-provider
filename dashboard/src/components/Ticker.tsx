@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useOpenMarket } from '../lib/openMarket'
 
 async function copy(text: string): Promise<boolean> {
   try {
@@ -18,8 +19,12 @@ async function copy(text: string): Promise<boolean> {
   }
 }
 
-/** Market ticker that copies itself to the clipboard on click. */
+/**
+ * A market ticker. Click: open the market's details (the same popup as the markets table).
+ * ⌘/Ctrl/Alt-click: copy it to the clipboard.
+ */
 export function Ticker({ value, help }: { value: string; help?: string }) {
+  const open = useOpenMarket()
   const [state, setState] = useState<'idle' | 'ok' | 'fail'>('idle')
   useEffect(() => {
     if (state === 'idle') return
@@ -27,18 +32,24 @@ export function Ticker({ value, help }: { value: string; help?: string }) {
     return () => clearTimeout(t)
   }, [state])
 
+  const act = async (e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean; stopPropagation: () => void }) => {
+    e.stopPropagation() // a click inside a clickable row opens this, not the row's own action
+    if (open && !(e.metaKey || e.ctrlKey || e.altKey)) open(value)
+    else setState((await copy(value)) ? 'ok' : 'fail')
+  }
+
   return (
     <span
       className={`ticker${state === 'ok' ? ' copied' : ''}`}
       data-help={help}
-      title="click to copy"
+      title={open ? 'click for details · ⌘/ctrl-click to copy' : 'click to copy'}
       role="button"
       tabIndex={0}
-      onClick={async () => setState((await copy(value)) ? 'ok' : 'fail')}
-      onKeyDown={async (e) => {
+      onClick={(e) => void act(e)}
+      onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          setState((await copy(value)) ? 'ok' : 'fail')
+          void act(e)
         }
       }}
     >

@@ -2,6 +2,7 @@ import { memo, useMemo } from 'react'
 import type { Journal } from '../lib/useJournal'
 import { kindClass, px, qty, sideClass } from '../lib/format'
 import { Stamp } from './Stamp'
+import { Ticker } from './Ticker'
 
 interface TapeItem {
   key: string
@@ -56,7 +57,9 @@ export const Tape = memo(function Tape({
         {i.trade && (
           <>
             {' '}
-            <span className="tk">{i.trade.ticker}</span>{' '}
+            <span className="tk">
+              <Ticker value={i.trade.ticker} />
+            </span>{' '}
             <span className={sideClass(i.trade.side)}>
               {i.trade.side.toUpperCase()} {i.trade.size}
             </span>

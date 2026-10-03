@@ -116,15 +116,22 @@ class QuoteEngine:
     def _reward_price(
         self, ctx: MarketContext, leg: Leg, grid: PriceGrid, cap: Decimal, size: Decimal
     ) -> Decimal:
-        """Deepest price whose reward share is within tolerance of the best achievable."""
+        """Deepest price whose reward share is within tolerance of the best achievable.
+
+        Each price is scored at the size that would really rest there (after
+        max_loss_per_fill). A big order can lift the reference price above others'
+        orders and halve their credit, a gain a loss-capped order never gets.
+        """
         own = ctx.book.bids(leg)
         top = min(own[0].price, cap)
         ref = reference_price(own, ctx.reward.reference_depth)
         price = min(ref, top) if ref is not None else top
+        inventory = leg.inventory(ctx.position)
 
         scored: list[tuple[Decimal, Decimal]] = []  # (price, share), deepest first
         for _ in range(_MAX_PRICES_SEARCHED):
-            scored.append((price, score_side(own, price, size, ctx.reward, grid).share))
+            posted = self._loss_capped(size, price, inventory)
+            scored.append((price, score_side(own, price, posted, ctx.reward, grid).share))
             if price >= top:
                 break
             price = grid.tick_above(price)
@@ -229,12 +236,13 @@ class QuoteEngine:
             return price  # inside already (or the book is too thin for the window to bind)
         partial: Decimal | None = None
         candidate = price
+        inventory = leg.inventory(ctx.position)
         for _ in range(_MAX_PRICES_SEARCHED):
             if candidate >= cap:
                 break
             candidate = grid.tick_above(candidate)
             ahead = depth_ahead(bids, candidate)
-            if ahead + size <= target:
+            if ahead + self._loss_capped(size, candidate, inventory) <= target:
                 return candidate
             if partial is None and ahead < target:
                 partial = candidate
