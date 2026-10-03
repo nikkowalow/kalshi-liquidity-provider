@@ -372,28 +372,36 @@ async def test_market_without_capital_left_is_not_quoted() -> None:
     )
 
 
-async def test_stopping_closes_open_positions(exchange: FakeExchange) -> None:
-    # Even when the exit during trading found no one (here: fills while halting),
-    # shutdown retries until flat.
+async def test_stopping_keeps_positions_but_a_halt_closes_them(exchange: FakeExchange) -> None:
     bot, feed = await started(exchange, risk={"flatten_on_fill": True})
     await step(bot, feed)
     bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
     exchange.fill(bid.order_id, D(10))
-    await bot.shutdown()  # e.g. after a session-loss halt
+    await bot.shutdown()  # Ctrl+C or the dashboard's stop: a restart picks it up
+    assert exchange.positions[T].position == 10 and not exchange.exits
+    assert not exchange.orders  # quotes are still pulled
+    bot.risk.halt("session loss")
+    await bot.shutdown()  # a risk halt does close it
     assert exchange.positions[T].position == 0
-    assert exchange.exits and exchange.exits[-1].side is Side.ASK
+    assert exchange.exits[-1].side is Side.ASK
 
 
-async def test_start_up_closes_positions_left_by_an_earlier_run(exchange: FakeExchange) -> None:
+async def test_start_up_keeps_positions_from_the_last_run_and_exits_them(
+    exchange: FakeExchange,
+) -> None:
     from kalshi_lp.exchange.models import Position
 
-    exchange.positions[T] = Position(T, D(-8), D("1.60"), D(0), D(0))
+    exchange.positions[T] = Position(T, D(-8), D("4.00"), D(0), D(0))  # 8 NO at 0.50
     feed = FakeFeed(exchange)
-    bot = LiquidityBot(settings(risk={"flatten_on_fill": True}), exchange, feed=feed)  # type: ignore[arg-type]
+    bot = LiquidityBot(
+        settings(risk={"flatten_on_fill": True, "exit_mode": "passive"}), exchange, feed=feed
+    )  # type: ignore[arg-type]
     bot.tracker.restore({T: {"earned": 0.1}})  # the ledger says we quoted T before
     await bot.startup()
-    assert exchange.positions[T].position == 0
-    assert exchange.exits[0].side is Side.BID  # bought back the short
+    assert exchange.positions[T].position == -8 and not exchange.exits  # not dumped
+    await step(bot, feed)
+    # The usual exit takes over. The NO bid (0.50) is back at the NO's cost (0.50): take it.
+    assert exchange.exits[-1].side is Side.BID and exchange.positions[T].position == 0
 
 
 # ------------------------------------------------- capital, churn, and switching

@@ -324,7 +324,17 @@ class LiquidityBot:
         if orphans:
             log.warning("found %d resting orders from a previous run; cancelling", len(orphans))
             await self._pull(orphans, "left over from a previous run")
-        await self.flatten_all()  # e.g. a halt or crash that left a position open
+        # Positions from the last run stay open: the first selection keeps their markets
+        # (reduce-only) and the usual exit (risk.exit_mode) takes over from there.
+        held = {t: p.position for t, p in self.state.positions.items() if p.position != 0}
+        held = {t: n for t, n in held.items() if t in self._traded()}
+        if held:
+            log.warning(
+                "keeping %d open position(s) from the last run (%s); exiting them %s",
+                len(held),
+                ", ".join(f"{t} {n:+f}" for t, n in held.items()),
+                f"via exit_mode={s.risk.exit_mode}" if s.risk.flatten_on_fill else "reduce-only",
+            )
 
         if not s.dry_run and s.risk.order_group_contracts_limit > 0:
             group = await self.client.create_order_group(s.risk.order_group_contracts_limit)
@@ -337,6 +347,13 @@ class LiquidityBot:
 
         await self.reselect()
         await self.feed.start(self.markets)
+
+    def _traded(self) -> set[str]:
+        """Markets the bot has quoted: now, this session, or in earlier sessions (the ledger).
+
+        Its positions can only be in these; anything else on the account is yours.
+        """
+        return set(self.markets) | set(self._selected) | set(self.tracker.stats)
 
     async def _wait_for_exchange(self) -> None:
         """Block until the exchange accepts trading (e.g. through maintenance), or stop()."""
@@ -372,10 +389,21 @@ class LiquidityBot:
                         "once the exchange is reachable.",
                         exc2,
                     )
-        try:
-            await self.flatten_all()
-        except TRANSIENT_ERRORS as exc:
-            log.critical("could not close positions before stopping (%s): check Kalshi", exc)
+        # A stop (Ctrl+C, the dashboard) keeps positions: the next start picks them up.
+        # A risk halt closes them: that's what the halt is for.
+        if self.risk.halted:
+            try:
+                await self.flatten_all()
+            except TRANSIENT_ERRORS as exc:
+                log.critical("could not close positions before stopping (%s): check Kalshi", exc)
+        else:
+            held = [
+                t for t, p in self.state.positions.items() if p.position and t in self._traded()
+            ]
+            if held:
+                log.warning(
+                    "leaving %d open position(s) for the next start: %s", len(held), ", ".join(held)
+                )
         group = self.executor.order_group_id
         if group:
             try:
@@ -445,7 +473,7 @@ class LiquidityBot:
         leftovers = [
             t
             for t, p in self.state.positions.items()
-            if p.position != 0 and t in self.markets and t not in chosen and t not in kept_paused
+            if p.position != 0 and t in self._traded() and t not in chosen and t not in kept_paused
         ]
         refreshed = await self.client.get_markets(tickers=leftovers) if leftovers else []
         return _Scan(incumbents, previous, paused, candidates, kept_paused, refreshed)
@@ -836,8 +864,7 @@ class LiquidityBot:
         risk = self.settings.risk
         if not (risk.flatten_on_fill or force) or self.settings.dry_run:
             return 0, {}
-        # Markets the bot has quoted: now, this session, or in earlier sessions (the ledger).
-        ours = set(self.markets) | set(self._selected) | set(self.tracker.stats)
+        ours = self._traded()
         open_: dict[str, Decimal] = {}
         found = 0
         for attempt in range(attempts):
