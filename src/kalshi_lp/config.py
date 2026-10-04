@@ -102,6 +102,15 @@ class SelectionConfig(_Section):
         2, ge=1, description="Diversify: cap markets from one series (their outcomes correlate)."
     )
     min_seconds_to_close: float = Field(3600, ge=0)
+    exclude_data_releases: bool = Field(
+        True,
+        description=(
+            "Never quote markets that close when a number is published (Kalshi's early close "
+            "condition: the economic data is released, the value is available, the maker "
+            "publishes it). Whoever has the number first sweeps every resting order on the "
+            "wrong side, often days before the market's close time."
+        ),
+    )
     min_mid_price: Decimal = Field(Decimal("0.05"), gt=0, lt=1)
     max_mid_price: Decimal = Field(Decimal("0.95"), gt=0, lt=1)
     max_spread: Decimal = Field(

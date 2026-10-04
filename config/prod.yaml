@@ -40,6 +40,9 @@ selection:
   max_markets: 10 # x up to $20 locked each ($10/side via max_loss_per_fill) = ~$200 of the budget
   max_per_series: 1 # unrelated events: one jump can't hit several of our markets at once
   min_seconds_to_close: 21600 # 6h; close_buffer_seconds pulls quotes 2h before close anyway
+  # Markets that close when a number is published (Kalshi's early close condition): Carbon Arc
+  # ad spend 2026-10-03 lost -$58.74 in 3 one-second sweeps 2+ days before close, vs $0.83 earned.
+  exclude_data_releases: true
   min_mid_price: 0.15 # near-decided markets: the cheap side collapses to ~0 on news
   max_mid_price: 0.85 # (fills at 7-10c lost 50-90% of the order: CPI, gas, YouTube views)
   max_spread: 0.08 # wider books have no trustworthy fair value

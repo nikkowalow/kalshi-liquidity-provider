@@ -13,6 +13,7 @@ the configured list.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -240,6 +241,11 @@ class MarketSelector:
             return "paused: sat out this scan"
         if series_of(market.ticker) in self.cfg.exclude_series:
             return f"its series {series_of(market.ticker)} is in selection.exclude_series"
+        if self.cfg.exclude_data_releases and closes_on_data_release(market):
+            return (
+                f'resolves on a published number ("{market.early_close_condition}"); '
+                "selection.exclude_data_releases"
+            )
         to_close = market.seconds_to_close()
         if to_close is not None and to_close < self.cfg.min_seconds_to_close:
             return (
@@ -774,6 +780,19 @@ class MarketSelector:
                 if len(chosen) >= limit:
                     break
         return chosen
+
+
+# Kalshi's early close conditions for markets that resolve when a number is published:
+# "...close and expire early if the economic data is released.", "...may expire early
+# after the specified value is available...", "...when the manufacturer officially
+# publishes...". Fixed-time markets say "regardless of any data releases": not these.
+_DATA_RELEASE = re.compile(r"data is released|value is available|officially publish", re.I)
+
+
+def closes_on_data_release(market: Market) -> bool:
+    """Whether ``market`` resolves when a number is published (and closes then)."""
+    condition = market.early_close_condition
+    return bool(_DATA_RELEASE.search(condition)) and "regardless" not in condition.lower()
 
 
 def series_of(ticker: str) -> str:

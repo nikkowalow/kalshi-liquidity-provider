@@ -69,6 +69,8 @@ class Market:
     grid: PriceGrid
     market_type: str = "binary"
     title: str = ""
+    can_close_early: bool = False
+    early_close_condition: str = ""  # Kalshi's wording, e.g. "...early if the data is released."
 
     @classmethod
     def from_api(cls, d: Mapping[str, Any]) -> Market:
@@ -85,6 +87,8 @@ class Market:
             grid=PriceGrid.from_api(d.get("price_ranges")),
             market_type=d.get("market_type", "binary"),
             title=d.get("yes_sub_title") or d.get("title") or "",
+            can_close_early=bool(d.get("can_close_early")),
+            early_close_condition=d.get("early_close_condition") or "",
         )
 
     @property

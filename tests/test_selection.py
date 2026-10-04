@@ -515,3 +515,38 @@ async def test_verdicts_name_the_filter_and_its_numbers() -> None:
     assert "max_spread" in sel.verdicts["WIDE-1"]["reason"]
     assert sel.verdicts["SOON-1"]["stage"] == "eligibility"
     assert "min_seconds_to_close" in sel.verdicts["SOON-1"]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("condition", "skipped"),
+    [
+        ("This market will close and expire early if the economic data is released.", True),
+        (
+            "This market may expire early after the specified value is available, per Rule 7.2.",
+            True,
+        ),
+        (
+            "It will close and expire early when the manufacturer officially publishes it.",
+            True,
+        ),
+        (
+            "The Last Trading Time will be 11:59 PM local time on October 5, 2026 regardless of "
+            "any data releases or events occurring.",
+            False,
+        ),
+        ("This market will close and expire after a winner is declared.", False),
+        ("", False),
+    ],
+)
+async def test_markets_that_close_on_a_data_release_are_skipped(condition, skipped) -> None:
+    m = make_market("ADS-1", can_close_early=True, early_close_condition=condition)
+    ex = FakeExchange([m], {"ADS-1": BOOK})
+    ex.programs = [program("ADS-1", 100)]
+    sel = selector(ex, mode="incentives", fallback_to_volume=False)
+    picked = await sel.select({"ADS-1": D(0)})
+    assert (picked == []) is skipped
+    if skipped:
+        assert sel.verdicts["ADS-1"]["stage"] == "eligibility"
+        assert "exclude_data_releases" in sel.verdicts["ADS-1"]["reason"]
+    off = selector(ex, mode="incentives", fallback_to_volume=False, exclude_data_releases=False)
+    assert [c.ticker for c in await off.select()] == ["ADS-1"]
