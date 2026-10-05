@@ -62,7 +62,7 @@ class Candidate:
     fill_risk: FillRisk | None = None  # set for the candidates whose trades were checked
     rank_multiplier: Decimal = Decimal(1)  # competition and incumbency factors
     unpaid_bonus: Decimal = ZERO  # $/day: what leaving would forfeit (see protect_unpaid)
-
+    # deploy 
     @property
     def pair_cost(self) -> Decimal:
         """Cash one contract on each leg locks (YES bid price + NO bid price)."""
