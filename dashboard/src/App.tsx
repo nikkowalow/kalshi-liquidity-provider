@@ -89,7 +89,10 @@ export default function App() {
           onSelect={setSelected}
         />
         <Charts journal={journal} state={state} live={live} />
-        <Scanner scan={raw.scan} />
+        <Scanner
+          scan={raw.scan}
+          selection={(state?.config as { selection?: Record<string, unknown> } | undefined)?.selection}
+        />
         <Blotter orders={journal.orders} fills={journal.fills} quotes={journal.quotes} />
         <OrdersAndFills orders={state?.orders ?? []} journal={journal} />
         <Selections selections={journal.selections} />

@@ -188,6 +188,17 @@ export interface ScanRow {
   net_daily: Num
   trading: boolean // the bot quotes it now
   skip: string | null // why the bot's filters would pass on it
+  // For the scanner's filters (newer bots only):
+  series?: string
+  mid?: Num
+  volume_24h?: Num // contracts traded in the last 24h
+  hours_to_resolve?: Num // until close, expected expiration or the ticker's date, whichever is sooner
+  program_hours_left?: Num
+  program_period_days?: Num
+  data_release?: boolean // closes when a number is published
+  excluded_series?: boolean // in selection.exclude_series
+  fill_events_per_day?: Num
+  trades_replayed?: Num // trades the fill-risk replay had (null: not checked)
 }
 
 export interface ScanReport {

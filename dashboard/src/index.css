@@ -352,3 +352,18 @@ button.bot-item:not(:disabled):hover { background: var(--hover); }
 .reason-link:hover, .reason-link:focus-visible { color: var(--accent); }
 .md.dsl { width: min(1200px, 100%); }
 .dsl-reason { padding: 6px 8px; font-size: 14px; color: var(--text); }
+
+/* market scanner filters */
+.scan-filters { position: sticky; top: 0; z-index: 2; background: var(--tint-1); border-bottom: 1px solid var(--line);
+  padding: 4px 6px; display: flex; flex-direction: column; gap: 4px; }
+.sf-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.sf-buttons { margin-left: auto; display: flex; gap: 4px; }
+.sf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 10px; }
+.sf-grid label { display: grid; grid-template-columns: 1fr 64px 62px; gap: 4px; align-items: center; font-size: 11px;
+  color: var(--muted); }
+.sf-grid label.on span { color: var(--accent); }
+.sf-grid input { font: inherit; font-size: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  padding: 0 4px; width: 100%; text-align: right; }
+.sf-grid i { font-style: normal; opacity: .7; }
+.sf-toggles { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; font-size: 11px; }
+.sf-sep { width: 8px; }

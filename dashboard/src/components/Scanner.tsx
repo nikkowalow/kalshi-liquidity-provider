@@ -1,9 +1,11 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useState } from 'react'
 import { type Accessors, sortRows, useSort } from '../lib/sort'
 import { pct, px, qty, signClass, usd } from '../lib/format'
+import { activeCount, botFilters, loadFilters, passes, saveFilters, type ScanFilters } from '../lib/scanFilters'
 import type { ScanReport, ScanRow } from '../types'
 import { CompetitionTag } from './CompetitionTag'
 import { Empty, Panel } from './Panel'
+import { ScanFilterBar } from './ScanFilterBar'
 import { SortTh } from './SortTh'
 import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
@@ -19,6 +21,8 @@ const COLUMNS: [label: string, align?: 'l'][] = [
   ['Capital'],
   ['Period $'],
   ['Left'],
+  ['Vol 24h'],
+  ['Resolves'],
   ['Prog $/d'],
   ['Target'],
   ['Bid'],
@@ -43,6 +47,8 @@ const ACCESSORS: Accessors<ScanRow> = {
   Capital: (r) => r.capital,
   'Period $': (r) => r.period_payout,
   Left: (r) => r.days_left,
+  'Vol 24h': (r) => r.volume_24h,
+  Resolves: (r) => r.hours_to_resolve,
   'Prog $/d': (r) => r.program_per_day,
   Target: (r) => r.target_size,
   Bid: (r) => r.bid,
@@ -102,6 +108,8 @@ const Row = memo(function Row({ r }: { r: ScanRow }) {
       <td>{usd(r.capital)}</td>
       <td className={r.period_payout < 1 ? 'dim' : undefined}>{usd(r.period_payout)}</td>
       <td className="dim">{timeLeft(r.days_left)}</td>
+      <td>{r.volume_24h == null ? '—' : qty(r.volume_24h)}</td>
+      <td className="dim">{r.hours_to_resolve == null ? '—' : timeLeft(r.hours_to_resolve / 24)}</td>
       <td className="yl">{usd(r.program_per_day)}</td>
       <td className="dim">{qty(r.target_size)}</td>
       <td className="bid">{px(r.bid)}</td>
@@ -133,14 +141,33 @@ const Row = memo(function Row({ r }: { r: ScanRow }) {
  * because of it. Refreshed every few minutes; the actual numbers, not the
  * capital multiplier's projection.
  */
-export const Scanner = memo(function Scanner({ scan }: { scan: ScanReport | null }) {
+export const Scanner = memo(function Scanner({
+  scan,
+  selection,
+}: {
+  scan: ScanReport | null
+  selection?: Record<string, unknown> // the bot's selection config, for the "bot's filters" preset
+}) {
   const sorter = useSort('scanner')
-  const [hideSkipped, setHideSkipped] = useState(false)
+  const [filters, setFiltersState] = useState<ScanFilters>(loadFilters)
+  const [showFilters, setShowFilters] = useState(false)
+  const setFilters = useCallback((f: ScanFilters) => {
+    setFiltersState(f)
+    saveFilters(f)
+  }, [])
+  const botPreset = useMemo(
+    () => (selection ? () => setFilters(botFilters(selection)) : null),
+    [selection, setFilters],
+  )
   const rows = useMemo(() => {
     const all = scan?.rows ?? []
-    return sortRows(hideSkipped ? all.filter((r) => !r.skip) : all, ACCESSORS, sorter.state)
-  }, [scan, hideSkipped, sorter.state])
-  const skipped = scan ? scan.rows.filter((r) => r.skip).length : 0
+    return sortRows(
+      all.filter((r) => passes(r, filters)),
+      ACCESSORS,
+      sorter.state,
+    )
+  }, [scan, filters, sorter.state])
+  const active = activeCount(filters)
   const trading = scan ? scan.rows.filter((r) => r.trading).length : 0
 
   return (
@@ -159,23 +186,32 @@ export const Scanner = memo(function Scanner({ scan }: { scan: ScanReport | null
         )
       }
       tools={
-        skipped > 0 && (
-          <button
-            type="button"
-            className={`chip${hideSkipped ? ' on' : ''}`}
-            data-help="chip:scan-skipped"
-            onClick={() => setHideSkipped((v) => !v)}
-          >
-            hide {skipped} filtered
-          </button>
-        )
+        <button
+          type="button"
+          className={`chip${showFilters || active ? ' on' : ''}`}
+          data-help="chip:scan-filters"
+          onClick={() => setShowFilters((v) => !v)}
+        >
+          filters{active ? ` (${active}) · ${rows.length} left` : ''}
+        </button>
       }
       height="lg"
     >
+      {showFilters && scan && (
+        <ScanFilterBar
+          filters={filters}
+          onChange={setFilters}
+          onBotPreset={botPreset}
+          shown={rows.length}
+          total={scan.rows.length}
+        />
+      )}
       {!scan ? (
         <Empty>no scan yet</Empty>
-      ) : rows.length === 0 ? (
+      ) : scan.rows.length === 0 ? (
         <Empty>no rewarded market earns anything at {qty(scan.size)} contracts right now</Empty>
+      ) : rows.length === 0 ? (
+        <Empty>no market passes these filters ({active} on)</Empty>
       ) : (
         <table>
           <thead>

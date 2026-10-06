@@ -40,7 +40,7 @@ from kalshi_lp.exchange.models import Market
 from kalshi_lp.strategy.fill_risk import FillRisk, PlannedQuote, depth_ahead, estimate_fill_risk
 from kalshi_lp.strategy.quoting import LegDecision, MarketContext, QuoteEngine
 from kalshi_lp.strategy.rewards import RewardParams, competition, expected_daily_reward
-from kalshi_lp.strategy.selection import MarketSelector, series_of
+from kalshi_lp.strategy.selection import MarketSelector, closes_on_data_release, series_of
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +90,13 @@ class MarketScanner:
         rows = []
         for rank, (est, market, book, reward, decisions) in enumerate(top, 1):
             quotes = _planned(book, decisions)
-            risk = await self._fill_risk(market.ticker, quotes, now) if self.cfg.fill_risk else None
+            risk, replayed = (
+                await self._fill_risk(market.ticker, quotes, now)
+                if self.cfg.fill_risk
+                else (None, None)
+            )
             row = self._row(rank, est, market, book, reward, decisions, quotes, risk, trading)
+            row["trades_replayed"] = replayed
             rows.append(row)
         report = {
             "scanned_at": started,
@@ -115,13 +120,14 @@ class MarketScanner:
 
     async def _fill_risk(
         self, ticker: str, quotes: dict[Leg, PlannedQuote], now: float
-    ) -> FillRisk | None:
+    ) -> tuple[FillRisk | None, int | None]:
+        """Expected fill cost from recent trades, and how many trades it replayed."""
         cfg = self.selector.cfg
         try:
             trades, hours = await self._history.recent_trades(ticker, now)
         except (KalshiError, httpx.HTTPError) as exc:
             log.debug("scanner: no trade history for %s (%s)", ticker, exc)
-            return None
+            return None, None
         finally:
             await asyncio.sleep(self.cfg.pace_seconds)  # leave the read budget to trading
         return estimate_fill_risk(
@@ -132,7 +138,7 @@ class MarketScanner:
             fee_rate=cfg.taker_fee_rate,
             adverse_move=cfg.adverse_move,
             queue_factor=cfg.fill_risk_queue_factor,
-        )
+        ), len(trades)
 
     def _row(
         self,
@@ -152,6 +158,13 @@ class MarketScanner:
         cost = risk.cost_per_day if risk else None
         bid, ask = book.best_yes_bid, book.best_yes_ask
         comp = competition(book, reward)
+        now = datetime.now(UTC)
+        resolve = market.seconds_to_resolve(now)
+        period = (
+            (reward.period_end - reward.period_start).total_seconds() / 86_400
+            if reward.period_end and reward.period_start
+            else None
+        )
         return {
             "rank": rank,
             "ticker": market.ticker,
@@ -177,6 +190,18 @@ class MarketScanner:
             "fills_per_day": risk.fills_per_day if risk else None,
             "fill_cost_per_day": cost,
             "net_daily": est - cost if cost is not None else None,
+            # For the dashboard's filters:
+            "series": series_of(market.ticker),
+            "mid": book.mid,
+            "volume_24h": market.volume_24h,
+            "hours_to_resolve": resolve / 3600 if resolve is not None else None,
+            "program_hours_left": (
+                (reward.period_end - now).total_seconds() / 3600 if reward.period_end else None
+            ),
+            "program_period_days": period,
+            "data_release": closes_on_data_release(market),
+            "excluded_series": series_of(market.ticker) in self.selector.cfg.exclude_series,
+            "fill_events_per_day": risk.hits_per_day if risk else None,
             "trading": market.ticker in trading,
             "skip": self._skip_reason(market, book, est * days),
         }

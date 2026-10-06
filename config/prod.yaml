@@ -162,6 +162,9 @@ risk:
   order_group_contracts_limit: 300 # (budget: ignored while scale_with_budget is on) exchange-side: >2 full fills (2 x max_size) in 15s cancels
   # everything. Exits are sent outside the group, so flattening never trips it.
 
+scanner:
+  top: 300 # rows the dashboard's scanner reports (and its filters work on)
+
 logging:
   level: INFO
   file: logs/prod.log

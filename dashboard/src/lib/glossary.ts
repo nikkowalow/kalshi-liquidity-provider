@@ -98,6 +98,9 @@ export const HELP: Record<string, HelpEntry> = {
   // flags
   "flag:PAST": ["PAST", "The bot isn't quoting this market now. It's here because the bot earned (or tried to earn) rewards in it earlier, in this session or a previous one. Earned and snapshot counts are totals across all sessions."],
   "panel:scanner": ["Market scanner", "Every market with an active liquidity program, estimated at the same size, 10 contracts per side, and ranked by $/day: which markets pay best. Research only: nothing here is traded, and the bot keeps choosing its markets with its own size and filters. Each estimate quotes the market the bot's way (its placement, offset, cushion and Target Size rules, but no loss cap, so every market is compared at the full 10), at the back of the queue, as if the current book held all day. Rescanned every few minutes (scanner.interval_seconds); the multiplier doesn't apply here."],
+  "chip:scan-filters": ["Filters", "What-if filters for the scanner: see which markets would be left under different selection rules. \"Bot's filters\" fills in the bot's current settings. Only filters this table; it never changes what the bot trades. Estimates here are at 10 contracts/side, not the bot's size."],
+  "scan:Vol 24h": ["Volume, 24h", "Contracts traded in this market in the last 24h. Quiet markets are where informed sweeps hit us hardest."],
+  "scan:Resolves": ["Resolves in", "Time until the market closes, its expected expiration, or the date in its event ticker, whichever is sooner."],
   "chip:scan-skipped": ["Hide filtered", "Hide markets the bot's own selection would skip anyway (excluded series, closing soon, spread or price outside the filters, or paying under Kalshi's $1 minimum this period)."],
   "scan:#": ["Rank", "Position by estimated $/day at 10 contracts per side, 1 = best."],
   "scan:Ticker": ["Ticker", "Kalshi's ID for the market. Hover for its title; click to copy."],
