@@ -6,6 +6,7 @@ fields default sensibly, so additive API changes don't break the bot.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -24,6 +25,26 @@ def parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+# A date in an event ticker, e.g. KXFEAR-26OCT09 (2026-10-09) or KXYTVIEWSW-FUE26OCT04.
+_MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+_TICKER_DATE = re.compile(rf"(\d{{2}})({'|'.join(_MONTHS)})(\d{{2}})")
+
+
+def ticker_date(event_ticker: str) -> datetime | None:
+    """The date named in ``event_ticker`` (start of that day, UTC), or None if there is none.
+
+    Often the day the outcome is decided, even when trading closes later: KXFEAR-26OCT09
+    resolves on Oct 9's reading but its close_time is Oct 16.
+    """
+    m = _TICKER_DATE.search(event_ticker)
+    if m is None:
+        return None
+    try:
+        return datetime(2000 + int(m[1]), _MONTHS.index(m[2]) + 1, int(m[3]), tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _opt_decimal(value: Any) -> Decimal | None:
@@ -71,6 +92,7 @@ class Market:
     title: str = ""
     can_close_early: bool = False
     early_close_condition: str = ""  # Kalshi's wording, e.g. "...early if the data is released."
+    expected_expiration_time: datetime | None = None  # when Kalshi expects it to resolve
 
     @classmethod
     def from_api(cls, d: Mapping[str, Any]) -> Market:
@@ -89,6 +111,7 @@ class Market:
             title=d.get("yes_sub_title") or d.get("title") or "",
             can_close_early=bool(d.get("can_close_early")),
             early_close_condition=d.get("early_close_condition") or "",
+            expected_expiration_time=parse_ts(d.get("expected_expiration_time")),
         )
 
     @property
@@ -107,6 +130,19 @@ class Market:
         if self.close_time is None:
             return None
         return (self.close_time - (now or datetime.now(UTC))).total_seconds()
+
+    def seconds_to_resolve(self, now: datetime | None = None) -> float | None:
+        """Seconds until the market closes or resolves, whichever is soonest: its close time,
+        Kalshi's expected expiration, or a future date in its event ticker (None if none is
+        known). A ticker date already past is ignored: then it isn't the resolution day."""
+        now = now or datetime.now(UTC)
+        named = ticker_date(self.event_ticker)
+        times = [
+            t
+            for t in (self.close_time, self.expected_expiration_time, named)
+            if t is not None and (t is not named or t > now)
+        ]
+        return min((t - now).total_seconds() for t in times) if times else None
 
 
 @dataclass(frozen=True, slots=True)

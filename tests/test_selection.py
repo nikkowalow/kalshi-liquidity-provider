@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -68,6 +69,54 @@ async def test_falls_back_to_volume_and_skips_wide_books() -> None:
 async def test_filters_markets_closing_soon() -> None:
     ex = FakeExchange([make_market("SOON-1", hours_to_close=0.5)], {"SOON-1": BOOK})
     assert await selector(ex, mode="volume", min_seconds_to_close=3600).select() == []
+
+
+async def test_expected_resolution_counts_as_closing() -> None:
+    # Trading closes in 30 days, but Kalshi expects it to resolve in 1: that's what counts.
+    soon = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    market = make_market("LATE-1", hours_to_close=720, expected_expiration_time=soon)
+    ex = FakeExchange([market], {"LATE-1": BOOK})
+    s = selector(ex, mode="volume", min_seconds_to_close=172800)
+    assert await s.select() == []
+    assert (s.ineligible_because(market) or "").startswith("closes or resolves in 24.0h")
+
+
+async def test_a_date_in_the_event_ticker_counts_as_resolving() -> None:
+    # KXFEAR-26OCT09: close_time a week later, but Oct 9's reading decides it.
+    day = datetime.now(UTC) + timedelta(days=2)
+    code = day.strftime("%y%b%d").upper()
+    market = make_market("FEAR-1", hours_to_close=720, event_ticker=f"KXFEAR-{code}")
+    assert market.seconds_to_resolve() < 2 * 86400
+    old = make_market("OLD-1", hours_to_close=720, event_ticker="KXMILEAD-26AUG17")
+    assert old.seconds_to_resolve() > 700 * 3600  # a past date isn't the resolution day
+
+
+async def test_markets_already_quoted_stay_until_the_held_threshold() -> None:
+    # 4 days left: too little to enter (7 days), enough to stay in (48h).
+    ex = FakeExchange([make_market("MID-1", hours_to_close=96)], {"MID-1": BOOK})
+    ex.programs = [program("MID-1", 100)]
+    cfg = {
+        "mode": "incentives",
+        "min_seconds_to_close": 7 * 86400,
+        "min_seconds_to_close_held": 2 * 86400,
+    }
+    assert await selector(ex, **cfg).select() == []
+    [c] = await selector(ex, **cfg).select(quoting=["MID-1"])
+    assert c.ticker == "MID-1"
+
+
+async def test_short_program_periods_are_skipped() -> None:
+    tickers = ["DAY-1", "WEEK-1"]
+    ex = FakeExchange(
+        [make_market(t, hours_to_close=720) for t in tickers], dict.fromkeys(tickers, BOOK)
+    )
+    weekly = program("WEEK-1", 100)
+    weekly = replace(weekly, end=weekly.start + timedelta(days=7))
+    ex.programs = [program("DAY-1", 500), weekly]  # 2-day period vs 7-day period
+    s = selector(ex, mode="incentives", min_program_period_days=7)
+    assert [c.ticker for c in await s.select()] == ["WEEK-1"]
+    [day] = s.reward_params([program("DAY-1", 500)]).values()
+    assert "runs 2.0-day periods" in (s.short_program_because(day) or "")
 
 
 async def test_caps_markets_per_series() -> None:

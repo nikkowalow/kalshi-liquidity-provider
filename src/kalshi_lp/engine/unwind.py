@@ -27,6 +27,11 @@ from kalshi_lp.core.orderbook import Orderbook
 from kalshi_lp.core.pricing import PriceGrid
 from kalshi_lp.core.types import ONE, Leg, Side
 
+# Off: every fill crosses the book at once, whatever risk.exit_mode says. On Oct 5 resting
+# at the entry never filled after a real move: the bot waited out unwind_seconds and then
+# crossed at a worse price (KXTRUMPPHOTO-26OCT11-5: 0.23 -> 0.16). Set True to bring it back.
+PASSIVE_UNWIND_ENABLED = False
+
 
 @dataclass(frozen=True, slots=True)
 class Entry:

@@ -509,6 +509,27 @@ def swept(exchange: FakeExchange) -> None:
     exchange.books[T] = make_book(yes=[("0.30", 50)], no=[("0.50", 15), ("0.48", 100)])
 
 
+@pytest.fixture
+def passive_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passive exits are switched off in the code; these tests switch them back on."""
+    monkeypatch.setattr("kalshi_lp.engine.bot.PASSIVE_UNWIND_ENABLED", True)
+
+
+async def test_passive_exit_mode_is_switched_off_and_crosses_at_once(
+    exchange: FakeExchange,
+) -> None:
+    bot, feed = await started(exchange, risk={"flatten_on_fill": True, "exit_mode": "passive"})
+    await step(bot, feed)
+    bid = next(o for o in exchange.orders.values() if o.side is Side.BID)
+    exchange.fill(bid.order_id, D(10))
+    swept(exchange)
+    await step(bot, feed)
+    [exit_] = exchange.exits  # sold into the 0.30 bid right away
+    assert exit_.side is Side.ASK and exchange.positions[T].position == 0
+    assert not exchange.unwinds and bot.snapshot()["markets"][0]["unwind"] is None
+
+
+@pytest.mark.usefixtures("passive_on")
 async def test_passive_exit_rests_at_entry_instead_of_crossing(exchange: FakeExchange) -> None:
     bot, feed = await started(exchange, risk={"flatten_on_fill": True, "exit_mode": "passive"})
     await step(bot, feed)
@@ -529,6 +550,7 @@ async def test_passive_exit_rests_at_entry_instead_of_crossing(exchange: FakeExc
     assert any(o.side is Side.BID for o in exchange.orders.values())  # quoting again
 
 
+@pytest.mark.usefixtures("passive_on")
 async def test_passive_exit_crosses_when_the_market_moves_against_it(
     exchange: FakeExchange,
 ) -> None:
@@ -546,6 +568,7 @@ async def test_passive_exit_crosses_when_the_market_moves_against_it(
     assert not exchange.orders  # the resting exit was cancelled first
 
 
+@pytest.mark.usefixtures("passive_on")
 async def test_passive_exit_crosses_after_its_window(exchange: FakeExchange) -> None:
     bot, feed = await started(
         exchange,

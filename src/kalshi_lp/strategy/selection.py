@@ -174,6 +174,7 @@ class MarketSelector:
         self._catalog: Catalog | None = None
         self._incumbents: dict[str, Decimal] = {}
         self._exclude: set[str] = set()
+        self._quoting: set[str] = set()
         self._trades: dict[str, _TradeHistory] = {}
         # Why each incumbent (a market we're in) fared as it did in the last select(): a
         # stage, a reason and the numbers behind it. The bot journals the ones it leaves.
@@ -246,11 +247,27 @@ class MarketSelector:
                 f'resolves on a published number ("{market.early_close_condition}"); '
                 "selection.exclude_data_releases"
             )
-        to_close = market.seconds_to_close()
-        if to_close is not None and to_close < self.cfg.min_seconds_to_close:
+        to_close = market.seconds_to_resolve()
+        limit, setting = self.cfg.min_seconds_to_close, "min_seconds_to_close"
+        if market.ticker in self._quoting and self.cfg.min_seconds_to_close_held is not None:
+            limit, setting = self.cfg.min_seconds_to_close_held, "min_seconds_to_close_held"
+        if to_close is not None and to_close < limit:
             return (
-                f"closes in {to_close / 3600:.1f}h, under selection.min_seconds_to_close "
-                f"({self.cfg.min_seconds_to_close / 3600:g}h)"
+                f"closes or resolves in {to_close / 3600:.1f}h, under selection.{setting} "
+                f"({limit / 3600:g}h)"
+            )
+        return None
+
+    def short_program_because(self, reward: RewardParams | None) -> str | None:
+        """Why ``reward``'s program period is too short to quote, or None if it's long enough."""
+        days = self.cfg.min_program_period_days
+        if not days or reward is None or reward.period_start is None or reward.period_end is None:
+            return None
+        length = (reward.period_end - reward.period_start).total_seconds() / 86_400
+        if length < days:
+            return (
+                f"its liquidity program runs {length:.1f}-day periods, under "
+                f"selection.min_program_period_days ({days:g})"
             )
         return None
 
@@ -320,14 +337,17 @@ class MarketSelector:
         incumbents: Mapping[str, Decimal] | None = None,
         exclude: Iterable[str] = (),
         keep: Iterable[str] = (),
+        quoting: Iterable[str] = (),
     ) -> list[Candidate]:
         """Pick markets. ``incumbents`` maps markets we already hold a stake in (quoting now,
         or rewards earned) to the rewards earned there; they get ``incumbent_bonus``.
         ``exclude`` sits markets out of this round (e.g. paused ones). ``keep`` (markets
         within min_hold_seconds of being selected) keep their slots, first in line for
-        capital, as long as they still pass the filters."""
+        capital, as long as they still pass the filters. ``quoting`` (markets selected now)
+        only need min_seconds_to_close_held to stay."""
         self._incumbents = dict(incumbents or {})
         self._exclude = set(exclude)
+        self._quoting = set(quoting)
         self.verdicts = {}
         catalog = await self.catalog()
         rewards = catalog.rewards
@@ -382,10 +402,12 @@ class MarketSelector:
         eligible = []
         for m in markets:
             why = self.ineligible_because(m)
-            if why is None:
-                eligible.append(m)
-            else:
+            if why is not None:
                 self._verdict(m.ticker, "eligibility", why)
+            elif by_reward and (why := self.short_program_because(rewards.get(m.ticker))):
+                self._verdict(m.ticker, "program", why)
+            else:
+                eligible.append(m)
         if not by_reward:
             # Pre-filter on the market summaries before spending order book reads.
             eligible = [

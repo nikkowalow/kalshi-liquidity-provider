@@ -144,7 +144,8 @@ class RiskManager:
         return max(self._market_pause_until.get(ticker, 0.0) - self._clock(), 0.0)
 
     def near_close(self, market: Market) -> bool:
-        to_close = market.seconds_to_close()
+        """Within close_buffer_seconds of closing or of its expected resolution."""
+        to_close = market.seconds_to_resolve()
         return to_close is not None and to_close < self.cfg.close_buffer_seconds
 
     # ---------------------------------------------------------------- update

@@ -188,7 +188,7 @@ class MarketScanner:
             return "excluded ticker"
         if series_of(market.ticker) in cfg.exclude_series:
             return "excluded series"
-        to_close = market.seconds_to_close()
+        to_close = market.seconds_to_resolve()
         if to_close is not None and to_close < cfg.min_seconds_to_close:
             return f"closes within {cfg.min_seconds_to_close / 3600:g}h"
         if not self.selector.book_is_quotable(book):

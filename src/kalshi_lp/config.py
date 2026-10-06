@@ -101,7 +101,32 @@ class SelectionConfig(_Section):
     max_per_series: int = Field(
         2, ge=1, description="Diversify: cap markets from one series (their outcomes correlate)."
     )
-    min_seconds_to_close: float = Field(3600, ge=0)
+    min_seconds_to_close: float = Field(
+        3600,
+        ge=0,
+        description=(
+            "Don't enter a market that closes or is expected to resolve (whichever is sooner) "
+            "within this long."
+        ),
+    )
+    min_seconds_to_close_held: float | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Markets we're already quoting stay selected until they're this close to closing "
+            "or resolving (None: the same as min_seconds_to_close). Lower than "
+            "min_seconds_to_close, so a market entered with a long time left is kept for most "
+            "of it."
+        ),
+    )
+    min_program_period_days: float = Field(
+        0,
+        ge=0,
+        description=(
+            "Only quote markets whose liquidity program runs periods at least this long "
+            "(0: any). Short programs (1-day periods) are the event-driven markets."
+        ),
+    )
     exclude_data_releases: bool = Field(
         True,
         description=(
@@ -399,7 +424,8 @@ class RiskConfig(_Section):
             "passive: rest an exit order at the entry price for up to unwind_seconds (a fill "
             "usually comes from a sweep that just emptied the book, so crossing at once sells "
             "at the worst price), crossing early when the price really moves against us "
-            "(unwind_stop) or when the market is about to close."
+            "(unwind_stop) or when the market is about to close. passive is switched off in "
+            "the code (engine.unwind.PASSIVE_UNWIND_ENABLED): every exit crosses at once."
         ),
     )
     unwind_seconds: float = Field(
@@ -419,7 +445,12 @@ class RiskConfig(_Section):
         description="passive exits: rest this far below the entry price (0 = break even).",
     )
     close_buffer_seconds: float = Field(
-        900, ge=0, description="Stop quoting this long before a market closes."
+        900,
+        ge=0,
+        description=(
+            "Stop quoting (and close any position) this long before a market closes or is "
+            "expected to resolve."
+        ),
     )
     max_consecutive_errors: int = Field(5, ge=1)
     max_mid_move: Decimal | None = Field(

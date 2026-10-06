@@ -52,7 +52,7 @@ from kalshi_lp.engine.reward_tracker import (
     strip_own,
 )
 from kalshi_lp.engine.risk import Mark, RiskManager, RiskView
-from kalshi_lp.engine.unwind import Entry, plan_exit
+from kalshi_lp.engine.unwind import PASSIVE_UNWIND_ENABLED, Entry, plan_exit
 from kalshi_lp.exchange.auth import Signer
 from kalshi_lp.exchange.client import KalshiClient
 from kalshi_lp.exchange.errors import KalshiError
@@ -400,7 +400,11 @@ class LiquidityBot:
                 "keeping %d open position(s) from the last run (%s); exiting them %s",
                 len(held),
                 ", ".join(f"{t} {n:+f}" for t, n in held.items()),
-                f"via exit_mode={s.risk.exit_mode}" if s.risk.flatten_on_fill else "reduce-only",
+                "by crossing the book" if s.risk.flatten_on_fill else "reduce-only",
+            )
+        if s.risk.exit_mode == "passive" and not PASSIVE_UNWIND_ENABLED:
+            log.warning(
+                "risk.exit_mode is passive, but passive exits are off: every fill exits at once"
             )
 
         if not s.dry_run and s.risk.order_group_contracts_limit > 0:
@@ -532,7 +536,9 @@ class LiquidityBot:
             for t in previous
             if t not in paused and now - self._selected_at.get(t, float("-inf")) < hold
         }
-        candidates = await self.selector.select(incumbents, exclude=paused, keep=keep)
+        candidates = await self.selector.select(
+            incumbents, exclude=paused, keep=keep, quoting=previous
+        )
         chosen = {c.ticker for c in candidates}
         # Nothing better to take their slot? Paused markets keep it (resuming after the pause).
         room = self.settings.selection.max_markets - len(candidates)
@@ -809,7 +815,7 @@ class LiquidityBot:
             return f"market paused: {self.risk.pause_reasons.get(ticker, 'risk limit')}"
         if self.risk.near_close(market):
             hours = self.settings.risk.close_buffer_seconds / 3600
-            return f"market closes within {hours:g}h"
+            return f"market closes or resolves within {hours:g}h"
         if self._moved_too_fast(ticker, book.mid):
             return f"market paused: {self.risk.pause_reasons.get(ticker, 'price moved fast')}"
         if self._sizes.get(ticker) == 0:
@@ -840,9 +846,10 @@ class LiquidityBot:
     def _flatten(self, ticker: str, own: list[Order], plan: Plan) -> bool:
         """Never hold shares: if ``ticker`` has a position, pull its quotes and get out.
 
-        ``risk.exit_mode`` decides how: cross the book now, or rest an exit order at
-        the entry price for a while (see :mod:`engine.unwind`). Returns True while the
-        market holds a position (skip normal quoting). Runs before the pause checks on
+        Crosses the book now. (``risk.exit_mode: passive``, resting an exit at the
+        entry price for a while, is switched off: see
+        ``engine.unwind.PASSIVE_UNWIND_ENABLED``.) Returns True while the market holds
+        a position (skip normal quoting). Runs before the pause checks on
         purpose: a fill often triggers a pause, and the position must still be closed.
         Only markets the bot trades: a position opened by hand elsewhere is left alone.
         """
@@ -858,7 +865,7 @@ class LiquidityBot:
         now = time.monotonic()
         book = self.state.book(ticker)
         why = "flatten"
-        if risk.exit_mode == "passive":
+        if PASSIVE_UNWIND_ENABLED and risk.exit_mode == "passive":
             market = self.markets[ticker]
             closing = self.risk.near_close(market)
             exit_ = plan_exit(
