@@ -126,8 +126,8 @@ quoting:
   default_target_size: 500
   default_discount_factor: 0.5
   post_only: true # maker only: never cross the spread with a quote (exits are the only takers)
-  min_cushion: 100 # others' contracts ahead of us, capped per market at Target Size / 5 (full credit)
-  min_quote_life_seconds: 10 # no reward-chasing moves for 10s (safety moves still immediate)
+  min_cushion: 250 # others' contracts ahead of us, capped per market at Target Size / 5 (full credit)
+  min_quote_life_seconds: 0 # off: a resting order moves down as soon as a safer price is better (no 10s grace)
 
 risk:
   max_capital: 450 # $ cap: position cost + cash locked in resting orders (actual $, per price)
