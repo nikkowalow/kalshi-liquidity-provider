@@ -79,7 +79,7 @@ export default function App() {
           />
         }
       />
-      <Kpis state={state} fills={journal.fills.length} rejects={rejects} />
+      <Kpis state={state} fills={journal.fills.length} rejects={rejects} payoutMinimum={payoutMinimum} />
       <Tape fills={journal.fills} orders={journal.orders} />
       <div className="grid">
         <MarketsTable

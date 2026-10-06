@@ -1529,6 +1529,7 @@ class LiquidityBot:
         view = self._last_view
         rewards_total = self.tracker.total_earned
         rate = self.tracker.total_hourly_rate()
+        payable = self.tracker.payable(time.time(), self.settings.selection.payout_minimum)
         markets = []
         self.titles.update((t, m.title) for t, m in self.markets.items())
         live = list(self.markets) + sorted(
@@ -1636,6 +1637,11 @@ class LiquidityBot:
                 "rewards_earned": rewards_total,  # all runs in this journal
                 "rewards_session": self.tracker.session_earned,
                 "rewards_per_hour": rate,
+                # What Kalshi will pay of rewards_earned: periods that reached the $1 minimum.
+                "rewards_payable": payable.payable,
+                "rewards_pending": payable.pending,  # running periods still under $1
+                "rewards_forfeited": payable.forfeited,  # ended under $1: never paid
+                "rewards_payable_per_hour": payable.payable_per_hour,
                 # Kalshi's actual payouts, from the balance (None until the first check).
                 "rewards_paid": self.payouts.paid if self.payouts else None,
                 "requotes": self.requotes,

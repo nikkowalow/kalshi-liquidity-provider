@@ -122,3 +122,27 @@ def test_open_period_earnings_leave_out_ended_periods() -> None:
         }
     )
     assert tracker.stats["MKT-1"].open_period_earned(now.timestamp()) == D("0.3")
+
+
+def test_only_periods_over_the_minimum_count_as_payable() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from kalshi_lp.engine.reward_tracker import RewardTracker
+
+    now = datetime.now(UTC)
+    ended, running = (now - timedelta(days=1)).isoformat(), (now + timedelta(days=1)).isoformat()
+    tracker = RewardTracker()
+    tracker.restore(
+        {
+            "BIG-1": {"earned": 3.5, "periods": {ended: 2.0, running: 1.5}},  # both paid
+            "SMALL-1": {"earned": 0.9, "periods": {ended: 0.6, running: 0.3}},  # forfeit, pending
+            "OLD-1": {"earned": 0.4},  # before periods were tracked: one lump under $1
+            "OLDBIG-1": {"earned": 1.2},  # ...and one over it
+        },
+        unattributed=0.05,
+    )
+    out = tracker.payable(now.timestamp(), Decimal(1))
+    assert out.payable == Decimal("4.7")
+    assert out.pending == Decimal("0.3")
+    assert out.forfeited == Decimal("1.05")
+    assert out.payable + out.pending + out.forfeited == tracker.total_earned

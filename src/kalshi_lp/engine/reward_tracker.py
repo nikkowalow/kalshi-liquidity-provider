@@ -76,6 +76,14 @@ class MarketRewardStats:
         return sum((e for _, e in self.recent), ZERO) * Decimal(3600) / Decimal(span)
 
 
+@dataclass(slots=True)
+class RewardsPayable:
+    payable: Decimal = ZERO  # in periods at or over Kalshi's minimum: will be paid
+    pending: Decimal = ZERO  # in running periods still under it: paid only if they reach it
+    forfeited: Decimal = ZERO  # in ended periods under it (or unattributable): never paid
+    payable_per_hour: Decimal = ZERO  # current rate in markets whose period is over it
+
+
 def own_orders_by_leg(
     orders: Iterable[Order], queue_ahead: Mapping[str, Decimal]
 ) -> dict[Leg, list[OwnOrder]]:
@@ -212,6 +220,39 @@ class RewardTracker:
     def total_hourly_rate(self) -> Decimal:
         now = self._clock()
         return sum((s.hourly_rate(now) for s in self.stats.values()), ZERO)
+
+    def payable(self, now: float, minimum: Decimal) -> RewardsPayable:
+        """Estimated earnings split by whether Kalshi will pay them.
+
+        Kalshi pays each market's program period on its own, and nothing for a period
+        under ``minimum``. So a period counts once it reaches the minimum; one still
+        running below it is pending; one that ended below it is forfeited. Earnings from
+        before periods were tracked are one lump per market, judged the same way (paid if
+        the lump reaches the minimum). Earlier runs' earnings not tied to a market can't
+        be judged and aren't counted.
+        """
+        out = RewardsPayable()
+        clock = self._clock()
+        for s in self.stats.values():
+            open_ = s.open_period_earned(now)
+            legacy = s.earned - sum(s.periods.values(), ZERO)
+            for end, earned in s.periods.items():
+                running = datetime.fromisoformat(end).timestamp() > now
+                if earned >= minimum:
+                    out.payable += earned
+                elif running:
+                    out.pending += earned
+                else:
+                    out.forfeited += earned
+            if legacy >= minimum:
+                out.payable += legacy
+            elif legacy > 0:
+                out.forfeited += legacy
+            # Earning now counts toward the payable total only once this period is over $1.
+            if open_ >= minimum:
+                out.payable_per_hour += s.hourly_rate(clock)
+        out.forfeited += self.unattributed
+        return out
 
     def report_lines(self) -> list[str]:
         now = self._clock()

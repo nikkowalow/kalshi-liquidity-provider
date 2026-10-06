@@ -12,6 +12,11 @@ export interface Totals {
   rewards_earned: Num // all runs in this journal
   rewards_session?: Num // since the bot last started
   rewards_per_hour: Num
+  // rewards_earned split by Kalshi's $1-per-market-period minimum (newer bots only):
+  rewards_payable?: Num // periods at or over it: will be paid
+  rewards_pending?: Num // running periods still under it
+  rewards_forfeited?: Num // ended under it: never paid
+  rewards_payable_per_hour?: Num // rate in markets whose period is already over it
   rewards_paid?: Num // Kalshi's actual payouts, from balance reconciliation (null until checked)
   requotes: Num
   fills?: Num // all runs in this journal

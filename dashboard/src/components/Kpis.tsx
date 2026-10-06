@@ -47,10 +47,12 @@ export function Kpis({
   state,
   fills,
   rejects,
+  payoutMinimum,
 }: {
   state: RunState | null
   fills: number
   rejects: number
+  payoutMinimum: number
 }) {
   const t = state?.totals
   const [balanceOpen, setBalanceOpen] = useState(false)
@@ -58,6 +60,8 @@ export function Kpis({
   const cap = num(t?.capital_in_use)
   const max = num(t?.max_capital)
   const rate = num(t?.rewards_per_hour)
+  // What Kalshi will pay: only market periods that reach the payout minimum (older bots: all).
+  const payable = num(t?.rewards_payable) ?? num(t?.rewards_earned)
   return (
     <div className="kpis">
       <Kpi
@@ -85,16 +89,19 @@ export function Kpis({
         label="Est. rewards"
         value={
           <Ticking
-            value={num(t?.rewards_earned)}
-            perHour={num(t?.rewards_per_hour)}
+            value={payable}
+            perHour={t?.rewards_payable != null ? num(t.rewards_payable_per_hour) : rate}
             at={state?.updated_at ?? null}
           />
         }
-        raw={num(t?.rewards_earned)}
+        raw={payable}
         sub={
-          t?.rewards_session != null
-            ? `${usd(t.rewards_session, 4)} this session · all ${state?.session ?? 1} sessions`
-            : "bot's estimate"
+          t?.rewards_payable != null
+            ? `periods over ${usd(payoutMinimum)} · ${usd(t.rewards_pending, 2)} pending · ` +
+              `${usd(t.rewards_forfeited, 2)} under ${usd(payoutMinimum)}, unpaid`
+            : t?.rewards_session != null
+              ? `${usd(t.rewards_session, 4)} this session · all ${state?.session ?? 1} sessions`
+              : "bot's estimate"
         }
       />
       <Kpi
@@ -104,8 +111,8 @@ export function Kpis({
         sub={
           t?.rewards_paid == null
             ? 'checking Kalshi…'
-            : num(t.rewards_earned)
-              ? `actual · ${((num(t.rewards_paid)! / num(t.rewards_earned)!) * 100).toFixed(0)}% of est.`
+            : payable
+              ? `actual · ${((num(t.rewards_paid)! / payable) * 100).toFixed(0)}% of est.`
               : 'actual, from Kalshi'
         }
       />
