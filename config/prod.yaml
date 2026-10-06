@@ -76,7 +76,7 @@ selection:
   taker_fee_rate: 0.07 # Kalshi taker fee: 0.07 x P x (1 - P) per contract
   adverse_move: 0.07 # measured: median 7-8c lost per filled contract on exit (was 0.02)
   min_net_daily_reward: 0
-  max_fill_cost_share: 0.15 # expected fills may eat at most 15% of a market's reward: with only
+  max_fill_cost_share: 0.2 # expected fills may eat at most 15% of a market's reward: with only
   # 5 markets, take the nearly fill-free ones, then rank them by net $/day
   max_fills_per_day: null # off: no liquid market has zero replayed fills; min_volume_24h and
   # max_fill_cost_share keep us out of the markets where fills cost most
