@@ -816,6 +816,9 @@ class LiquidityBot:
         if self.risk.near_close(market):
             hours = self.settings.risk.close_buffer_seconds / 3600
             return f"market closes or resolves within {hours:g}h"
+        reward = self.rewards.get(ticker)
+        if reward is not None and (ending := self.selector.program_ending_because(reward)):
+            return ending
         if self._moved_too_fast(ticker, book.mid):
             return f"market paused: {self.risk.pause_reasons.get(ticker, 'price moved fast')}"
         if self._sizes.get(ticker) == 0:

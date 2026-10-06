@@ -127,6 +127,14 @@ class SelectionConfig(_Section):
             "(0: any). Short programs (1-day periods) are the event-driven markets."
         ),
     )
+    min_program_seconds_left: float = Field(
+        0,
+        ge=0,
+        description=(
+            "Don't enter, and leave, a market whose liquidity program period ends within this "
+            "long (0: off). Quotes come off at once, not at the next scan."
+        ),
+    )
     exclude_data_releases: bool = Field(
         True,
         description=(

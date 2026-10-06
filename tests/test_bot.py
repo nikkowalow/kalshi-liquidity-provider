@@ -713,3 +713,17 @@ async def test_leaving_a_market_journals_why(tmp_path) -> None:
     record = _deselect_record(path, first, float("inf"))
     assert record is not None and record["recorded"] and record["stage"] == "paused"
     assert _deselect_record(path, first, e["ts"] - 60) is None  # nothing that early
+
+
+async def test_quotes_come_off_when_the_program_period_is_about_to_end(
+    exchange: FakeExchange,
+) -> None:
+    from dataclasses import replace
+
+    bot, feed = await started(exchange, selection={"min_program_seconds_left": 7200})
+    await step(bot, feed)
+    assert resting(exchange)
+    soon = datetime.now(UTC) + timedelta(hours=1)
+    bot.rewards[T] = replace(bot.rewards[T], period_end=soon)  # no rescan needed
+    await step(bot, feed)
+    assert not resting(exchange)

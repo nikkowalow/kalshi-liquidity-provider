@@ -44,6 +44,7 @@ selection:
   min_seconds_to_close: 259200 # enter only with 7+ days left
   min_seconds_to_close_held: 86400 # leave at 48h left (risk.close_buffer_seconds pulls quotes then too)
   min_program_period_days: 1 # program periods of 7+ days (skips the 1-, 2- and 4-day ones)
+  min_program_seconds_left: 7200 # leave (and don't enter) when the program period ends within 2h
   # Markets that close when a number is published (Kalshi's early close condition): Carbon Arc
   # ad spend 2026-10-03 lost -$58.74 in 3 one-second sweeps 2+ days before close, vs $0.83 earned.
   exclude_data_releases: true

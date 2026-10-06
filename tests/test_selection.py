@@ -105,6 +105,19 @@ async def test_markets_already_quoted_stay_until_the_held_threshold() -> None:
     assert c.ticker == "MID-1"
 
 
+async def test_programs_ending_soon_are_left() -> None:
+    ex = FakeExchange([make_market("END-1", hours_to_close=720)], {"END-1": BOOK})
+    ending = program("END-1", 100)
+    ex.programs = [replace(ending, end=datetime.now(UTC) + timedelta(hours=1))]
+    s = selector(ex, mode="incentives", fallback_to_volume=False, min_program_seconds_left=7200)
+    assert await s.select(quoting=["END-1"]) == []  # even a market we're quoting
+    [params] = s.reward_params(ex.programs).values()
+    assert "period ends in 1.0h" in (s.program_ending_because(params) or "")
+    ex.programs = [replace(ending, end=datetime.now(UTC) + timedelta(hours=3))]
+    s = selector(ex, mode="incentives", fallback_to_volume=False, min_program_seconds_left=7200)
+    assert [c.ticker for c in await s.select()] == ["END-1"]  # 3h left: fine
+
+
 async def test_short_program_periods_are_skipped() -> None:
     tickers = ["DAY-1", "WEEK-1"]
     ex = FakeExchange(

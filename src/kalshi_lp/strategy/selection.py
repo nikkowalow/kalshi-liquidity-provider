@@ -17,6 +17,7 @@ import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, TypeVar
 
@@ -259,15 +260,31 @@ class MarketSelector:
         return None
 
     def short_program_because(self, reward: RewardParams | None) -> str | None:
-        """Why ``reward``'s program period is too short to quote, or None if it's long enough."""
-        days = self.cfg.min_program_period_days
-        if not days or reward is None or reward.period_start is None or reward.period_end is None:
+        """Why ``reward``'s program is too short to quote (its periods, or the time left in
+        this one), or None if it's long enough."""
+        if reward is None or reward.period_start is None or reward.period_end is None:
             return None
+        if (ending := self.program_ending_because(reward)) is not None:
+            return ending
+        days = self.cfg.min_program_period_days
         length = (reward.period_end - reward.period_start).total_seconds() / 86_400
-        if length < days:
+        if days and length < days:
             return (
                 f"its liquidity program runs {length:.1f}-day periods, under "
                 f"selection.min_program_period_days ({days:g})"
+            )
+        return None
+
+    def program_ending_because(self, reward: RewardParams) -> str | None:
+        """Why we must leave: the program period ends within min_program_seconds_left."""
+        limit = self.cfg.min_program_seconds_left
+        if not limit or reward.period_end is None:
+            return None
+        left = (reward.period_end - datetime.now(UTC)).total_seconds()
+        if left < limit:
+            return (
+                f"its liquidity program period ends in {max(left, 0) / 3600:.1f}h, under "
+                f"selection.min_program_seconds_left ({limit / 3600:g}h)"
             )
         return None
 
