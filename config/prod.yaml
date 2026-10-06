@@ -51,7 +51,7 @@ selection:
   max_spread: 0.08 # wider books have no trustworthy fair value
   # Illiquid markets (Oct 7, from all 44 fills): under 100 contracts/day lost 56% of the position
   # (7 of the 9 big losses); over 1,000/day lost 15%. A quiet book plus a sudden sweep = informed.
-  min_volume_24h: 1000 # contracts traded in the last 24h, to enter or stay
+  min_volume_24h: 250 # contracts traded in the last 24h, to enter or stay
   min_daily_reward: 0 # off: the payout filter decides
   # The $1 rule. Kalshi pays nothing under $1 per market, so only enter a market projected to
   # pay 2x that by its period end/close (room for pauses and estimate error). Once in, it only
