@@ -127,6 +127,25 @@ class SelectionConfig(_Section):
             "(0: any). Short programs (1-day periods) are the event-driven markets."
         ),
     )
+    min_volume_24h: Decimal = Field(
+        Decimal(0),
+        ge=0,
+        description=(
+            "Skip (and leave) markets that traded fewer contracts than this in the last 24h "
+            "(0: off). In quiet markets a fill is almost always someone who knows the outcome: "
+            "of the bot's first 44 fills, those in markets under 100 contracts/day lost 56% of "
+            "the position, vs 15% in markets over 1,000."
+        ),
+    )
+    min_fill_risk_trades: int = Field(
+        0,
+        ge=0,
+        description=(
+            "A market needs at least this many trades in the replay window "
+            "(trade_lookback_hours) for its fill risk to count as known; with fewer it is "
+            "dropped, not scored as 0 fills (0: off). No trades means no evidence, not no risk."
+        ),
+    )
     min_program_seconds_left: float = Field(
         0,
         ge=0,

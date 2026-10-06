@@ -41,8 +41,8 @@ selection:
   max_per_series: 1 # unrelated events: one jump can't hit several of our markets at once
   # Long-lived markets only (Oct 6, after the Oct 5 fills: YouTube views on its last day, daily
   # gas, 1-day programs). Close or expected resolution, whichever is sooner.
-  min_seconds_to_close: 259200 # enter only with 7+ days left
-  min_seconds_to_close_held: 86400 # leave at 48h left (risk.close_buffer_seconds pulls quotes then too)
+  min_seconds_to_close: 86400 # enter only with 24h+ left
+  min_seconds_to_close_held: 86400 # leave at 24h left
   min_program_period_days: 1 # program periods of 7+ days (skips the 1-, 2- and 4-day ones)
   min_program_seconds_left: 7200 # leave (and don't enter) when the program period ends within 2h
   # Markets that close when a number is published (Kalshi's early close condition): Carbon Arc
@@ -51,6 +51,9 @@ selection:
   min_mid_price: 0.15 # near-decided markets: the cheap side collapses to ~0 on news
   max_mid_price: 0.85 # (fills at 7-10c lost 50-90% of the order: CPI, gas, YouTube views)
   max_spread: 0.08 # wider books have no trustworthy fair value
+  # Illiquid markets (Oct 7, from all 44 fills): under 100 contracts/day lost 56% of the position
+  # (7 of the 9 big losses); over 1,000/day lost 15%. A quiet book plus a sudden sweep = informed.
+  min_volume_24h: 1000 # contracts traded in the last 24h, to enter or stay
   min_daily_reward: 0 # off: the payout filter decides
   # The $1 rule. Kalshi pays nothing under $1 per market, so only enter a market projected to
   # pay 2x that by its period end/close (room for pauses and estimate error). Once in, it only
@@ -75,8 +78,9 @@ selection:
   min_net_daily_reward: 0
   max_fill_cost_share: 0.15 # expected fills may eat at most 15% of a market's reward: with only
   # 5 markets, take the nearly fill-free ones, then rank them by net $/day
-  max_fills_per_day: 0 # 0.0% fill risk only: any market a replayed sweep would have reached is out
-  # (and any whose trade history can't be read)
+  max_fills_per_day: null # off: no liquid market has zero replayed fills; min_volume_24h and
+  # max_fill_cost_share keep us out of the markets where fills cost most
+  min_fill_risk_trades: 20 # fewer trades in the replay window: fill risk unknown, not 0%: skip
   catalog_refresh_seconds: 600 # reuse the program/market list for 10 min; books are always fresh
   incumbent_bonus: 0.25 # a newcomer must pay 25%+ more to take a held market's slot
   min_hold_seconds: 14400 # a picked market keeps its slot 4h while it passes the filters
@@ -153,7 +157,7 @@ risk:
   fill_burst_contracts: 2 # any fill of 2+ contracts pauses that market...
   fill_burst_window_seconds: 300
   cooldown_seconds: 300 # ...for 5 minutes (it keeps its slot)
-  close_buffer_seconds: 172800 # 48h before close or expected resolution: stop quoting, get out
+  close_buffer_seconds: 86400 # 48h before close or expected resolution: stop quoting, get out
   max_consecutive_errors: 5
   max_mid_move: 0.04 # mid moves 4c within 60s -> news; pause the market
   mid_move_window_seconds: 60

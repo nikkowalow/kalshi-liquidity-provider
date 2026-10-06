@@ -363,6 +363,31 @@ async def test_markets_with_any_expected_fills_are_skipped_at_zero(caplog) -> No
     assert "over 0 expected fills/day" in caplog.text
 
 
+async def test_illiquid_markets_are_skipped() -> None:
+    tickers = ["QUIET-1", "BUSY-1"]
+    ex = FakeExchange(
+        [make_market("QUIET-1", volume_24h_fp="40.00"), make_market("BUSY-1")],
+        dict.fromkeys(tickers, BOOK),
+    )
+    ex.programs = [program("QUIET-1", 500), program("BUSY-1", 100)]
+    s = selector(ex, mode="incentives", fallback_to_volume=False, min_volume_24h=D(1000))
+    assert [c.ticker for c in await s.select(quoting=["QUIET-1"])] == ["BUSY-1"]
+    assert "too illiquid" in (s.ineligible_because(ex.markets["QUIET-1"]) or "")
+
+
+async def test_no_trade_history_is_unknown_risk_not_zero(caplog) -> None:
+    tickers = ["SILENT-1", "TRADED-1"]
+    ex = FakeExchange([make_market(t) for t in tickers], dict.fromkeys(tickers, BOOK))
+    ex.programs = [program("SILENT-1", 500), program("TRADED-1", 100)]
+    ex.trades["TRADED-1"] = sweep_trades("TRADED-1", n=25, volume=1)  # small: never reach us
+    caplog.set_level("INFO", logger="kalshi_lp.strategy.selection")
+    cfg = {"mode": "incentives", "fallback_to_volume": False, "max_fills_per_day": D(0)}
+    assert [c.ticker for c in await selector(ex, **cfg).select()] == ["SILENT-1", "TRADED-1"]
+    picked = await selector(ex, **cfg, min_fill_risk_trades=20).select()
+    assert [c.ticker for c in picked] == ["TRADED-1"]
+    assert "fill risk unknown" in caplog.text
+
+
 def test_fill_caps_need_fill_risk() -> None:
     with pytest.raises(ValueError, match="max_fills_per_day"):
         SelectionConfig(fill_risk=False, max_fills_per_day=D(0))

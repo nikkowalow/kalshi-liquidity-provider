@@ -248,6 +248,11 @@ class MarketSelector:
                 f'resolves on a published number ("{market.early_close_condition}"); '
                 "selection.exclude_data_releases"
             )
+        if market.volume_24h < self.cfg.min_volume_24h:
+            return (
+                f"traded {market.volume_24h:.0f} contracts in 24h, under "
+                f"selection.min_volume_24h ({self.cfg.min_volume_24h:.0f}): too illiquid"
+            )
         to_close = market.seconds_to_resolve()
         limit, setting = self.cfg.min_seconds_to_close, "min_seconds_to_close"
         if market.ticker in self._quoting and self.cfg.min_seconds_to_close_held is not None:
@@ -481,6 +486,7 @@ class MarketSelector:
         dropped: list[Candidate] = []
         too_busy: list[Candidate] = []
         too_costly: list[Candidate] = []
+        unknown: list[Candidate] = []
         checked = 0
         for i, c in enumerate(ranked):
             enough = len(self._diversify(kept, cfg.max_markets)) >= cfg.max_markets
@@ -510,6 +516,17 @@ class MarketSelector:
                     "no trade history for %s (%s); ranking it without fill risk", c.ticker, exc
                 )
                 kept.append(c)
+                continue
+            if len(trades) < cfg.min_fill_risk_trades:
+                unknown.append(c)
+                self._verdict(
+                    c.ticker,
+                    "fill_risk",
+                    f"only {len(trades)} trades in {hours:.0f}h, under "
+                    f"selection.min_fill_risk_trades ({cfg.min_fill_risk_trades}): fill risk "
+                    "unknown",
+                    c,
+                )
                 continue
             risk = estimate_fill_risk(
                 trades,
@@ -567,6 +584,12 @@ class MarketSelector:
         )
         if dropped:
             log.info("  skipped %4d: fills would cost more than the rewards", len(dropped))
+        if unknown:
+            log.info(
+                "  skipped %4d: under %d trades to replay (fill risk unknown)",
+                len(unknown),
+                cfg.min_fill_risk_trades,
+            )
         if too_busy:
             log.info(
                 "  skipped %4d: over %s expected fills/day (or no trade history)",
