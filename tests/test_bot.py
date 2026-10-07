@@ -639,6 +639,38 @@ async def test_a_new_budget_rescales_the_running_bot(exchange: FakeExchange) -> 
     assert exchange.group_limits == [bot.settings.risk.order_group_contracts_limit]
 
 
+async def test_budget_is_spread_over_the_markets_selected(exchange: FakeExchange) -> None:
+    bot, _ = await started(
+        exchange,
+        selection={"max_markets": 4},
+        quoting={"auto_size": True},
+        risk={
+            "max_capital": 100,
+            "scale_with_budget": True,
+            "split_budget_over_selected": True,
+            "order_group_contracts_limit": 10,
+        },
+    )
+    # One market selected of 4 slots: it gets the whole budget, not a quarter of it.
+    assert list(bot.markets) == [T]
+    assert bot.settings.quoting.max_loss_per_fill == D("47.50")  # 100 x 0.95 / (1 x 2)
+    assert bot.engine.cfg.max_loss_per_fill == D("47.50")
+    assert bot.risk.cfg.max_session_loss == D("95.00")
+    # Selection still sizes candidates at the full 4-market split.
+    assert bot.selector.quoting.max_loss_per_fill == D("11.87")
+    assert bot.selector.engine.cfg.max_loss_per_fill == D("11.87")
+
+
+async def test_budget_split_is_off_by_default(exchange: FakeExchange) -> None:
+    bot, _ = await started(
+        exchange,
+        selection={"max_markets": 4},
+        quoting={"auto_size": True},
+        risk={"max_capital": 100, "scale_with_budget": True, "order_group_contracts_limit": 10},
+    )
+    assert bot.settings.quoting.max_loss_per_fill == D("11.87")  # 100 x 0.95 / (4 x 2)
+
+
 async def test_each_fill_records_its_fill_risk(exchange: FakeExchange, tmp_path) -> None:
     import json
 

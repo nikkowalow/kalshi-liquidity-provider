@@ -413,6 +413,24 @@ class RiskConfig(_Section):
             "are then ignored."
         ),
     )
+    split_budget_over_selected: bool = Field(
+        False,
+        description=(
+            "With scale_with_budget: spread the budget over the markets actually selected, "
+            "not over selection.max_markets. 5 markets picked of 10 slots then get twice the "
+            "size each (and the per-side loss cap, exposure and session loss limits grow with "
+            "it), so most of the budget is used. Selection still estimates candidates at the "
+            "max_markets split, so more markets are taken on when they qualify."
+        ),
+    )
+    budget_min_markets: int = Field(
+        1,
+        ge=1,
+        description=(
+            "split_budget_over_selected never splits over fewer markets than this: with only "
+            "1 or 2 picked, it caps how much of the budget a single market can take."
+        ),
+    )
     max_position_per_market: Decimal = Field(Decimal("50"), gt=0, description="Contracts.")
     max_total_exposure: Decimal = Field(Decimal("100"), gt=0, description="Dollars at cost.")
     max_session_loss: Decimal = Field(
@@ -629,10 +647,12 @@ BUDGET_EXPOSURE_FILLS = 4  # max_total_exposure: this many full fills held at on
 BUDGET_SESSION_LOSS_FILLS = 2  # max_session_loss: this many worst-case fills
 
 
-def budget_scaled(settings: Settings) -> Settings:
+def budget_scaled(settings: Settings, markets: int | None = None) -> Settings:
     """``settings`` with the budget-sized limits derived from risk.max_capital (if enabled).
 
-    per side = max_capital x capital_utilization / (max_markets x 2), and from that:
+    ``markets``: how many markets share the budget (default and at most
+    selection.max_markets; at least risk.budget_min_markets when given).
+    per side = max_capital x capital_utilization / (markets x 2), and from that:
     max_loss_per_fill = per side; max_size = max_position_per_market = per side / 0.10;
     order_group_contracts_limit = 2 x max_size; max_total_exposure = 4 x per side;
     max_session_loss = 2 x per side.
@@ -640,8 +660,9 @@ def budget_scaled(settings: Settings) -> Settings:
     risk, quoting = settings.risk, settings.quoting
     if not risk.scale_with_budget or risk.max_capital is None:
         return settings
-    markets = Decimal(settings.selection.max_markets)
-    per_side = (risk.max_capital * quoting.capital_utilization / (markets * 2)).quantize(
+    slots = settings.selection.max_markets
+    split = slots if markets is None else min(max(markets, risk.budget_min_markets), slots)
+    per_side = (risk.max_capital * quoting.capital_utilization / (Decimal(split) * 2)).quantize(
         Decimal("0.01"), rounding=ROUND_FLOOR
     )
     size = (per_side / BUDGET_CHEAPEST_SIDE).to_integral_value(rounding=ROUND_CEILING)

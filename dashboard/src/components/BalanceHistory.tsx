@@ -1,18 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { apiUrl } from '../lib/api'
+import { type BalanceChange, fetchBalanceChanges } from '../lib/balance'
 import { signClass, signedUsd, usd } from '../lib/format'
 import { Stamp } from './Stamp'
 import { Ticker } from './Ticker'
 
-/** GET /api/balance (see src/kalshi_lp/engine/balance_history.py). */
-interface Change {
-  ts: number
-  kind: 'fill' | 'settlement' | 'deposit' | 'withdrawal' | 'reward' | 'unexplained'
-  ticker: string | null
-  amount: number
-  balance_after?: number
-  detail: string
-}
+type Change = BalanceChange
 
 const KINDS: Change['kind'][] = ['reward', 'fill', 'settlement', 'deposit', 'withdrawal', 'unexplained']
 const KIND_CLASS: Record<Change['kind'], string> = {
@@ -24,16 +16,6 @@ const KIND_CLASS: Record<Change['kind'], string> = {
   unexplained: 'neg',
 }
 
-async function fetchChanges(): Promise<Change[] | { error: string }> {
-  try {
-    const res = await fetch(apiUrl('/api/balance'))
-    const data = await res.json()
-    return res.ok ? (data as Change[]) : { error: data.error ?? res.statusText }
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) }
-  }
-}
-
 /** Every change to the account balance, with when it happened (click the Balance tile). */
 export function BalanceHistory({ onClose }: { onClose: () => void }) {
   const [changes, setChanges] = useState<Change[] | null>(null)
@@ -42,7 +24,7 @@ export function BalanceHistory({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let alive = true
-    void fetchChanges().then((r) => {
+    void fetchBalanceChanges().then((r) => {
       if (!alive) return
       if ('error' in r) setError(r.error)
       else setChanges(r)

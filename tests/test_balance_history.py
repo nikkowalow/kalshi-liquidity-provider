@@ -61,6 +61,26 @@ def test_a_gap_while_the_bot_was_stopped_doesnt_count_as_holding() -> None:
     assert unlisted_changes(bal, listed) == []
 
 
+def test_a_deposit_that_posts_late_is_not_a_payout() -> None:
+    # Kalshi dates the deposit at 100; the balance only shows it at 340. In between the
+    # balance looks $237.57 short, then catches up: neither is a payout or a debit.
+    deposit = {"ts": 100, "kind": "deposit", "amount": D("237.57")}
+    bal = samples(
+        *[(t, "100") for t in range(0, 340, 10)], *[(t, "337.57") for t in range(340, 600, 10)]
+    )
+    assert unlisted_changes(bal, [deposit]) == []
+
+
+def test_a_real_payout_after_a_debit_still_counts() -> None:
+    bal = samples(
+        *[(t, "100") for t in range(0, 100, 10)],
+        *[(t, "95") for t in range(100, 200, 10)],  # a debit Kalshi doesn't list
+        *[(t, "97") for t in range(200, 300, 10)],  # then a $2 payout: not the same size
+    )
+    kinds = [(c["kind"], c["amount"]) for c in unlisted_changes(bal, [])]
+    assert kinds == [("unexplained", D(-5)), ("reward", D(2))]
+
+
 def test_history_is_newest_first_with_the_balance_after_each_change() -> None:
     records = {"fills": [fill(50, "bid", "0.40", 10)]}
     bal = samples(*[(t, "100") for t in range(0, 60, 10)], *[(t, "96") for t in range(60, 400, 10)])

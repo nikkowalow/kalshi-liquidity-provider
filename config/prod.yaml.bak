@@ -39,10 +39,19 @@ selection:
   fallback_to_volume: false # in prod, only quote markets that pay rewards
   max_markets: 10 # x up to $20 locked each ($10/side via max_loss_per_fill) = ~$200 of the budget
   max_per_series: 1 # unrelated events: one jump can't hit several of our markets at once
+  # Close or expected resolution (or a future date in the event ticker), whichever is sooner.
   min_seconds_to_close: 21600 # 6h; close_buffer_seconds pulls quotes 2h before close anyway
+  min_program_period_days: 0 # any program length
+  min_program_seconds_left: 7200 # leave (and don't enter) when the program period ends within 2h
+  # Markets that close when a number is published (Kalshi's early close condition): Carbon Arc
+  # ad spend 2026-10-03 lost -$58.74 in 3 one-second sweeps 2+ days before close, vs $0.83 earned.
+  exclude_data_releases: true
   min_mid_price: 0.15 # near-decided markets: the cheap side collapses to ~0 on news
   max_mid_price: 0.85 # (fills at 7-10c lost 50-90% of the order: CPI, gas, YouTube views)
   max_spread: 0.08 # wider books have no trustworthy fair value
+  # Illiquid markets (Oct 7, from all 44 fills): under 100 contracts/day lost 56% of the position
+  # (7 of the 9 big losses); over 1,000/day lost 15%. A quiet book plus a sudden sweep = informed.
+  min_volume_24h: 250 # contracts traded in the last 24h, to enter or stay
   min_daily_reward: 0 # off: the payout filter decides
   # The $1 rule. Kalshi pays nothing under $1 per market, so only enter a market projected to
   # pay 2x that by its period end/close (room for pauses and estimate error). Once in, it only
@@ -65,9 +74,11 @@ selection:
   taker_fee_rate: 0.07 # Kalshi taker fee: 0.07 x P x (1 - P) per contract
   adverse_move: 0.07 # measured: median 7-8c lost per filled contract on exit (was 0.02)
   min_net_daily_reward: 0
-  max_fill_cost_share: 0.15 # expected fills may eat at most 15% of a market's reward: with only
+  max_fill_cost_share: 0.2 # expected fills may eat at most 15% of a market's reward: with only
   # 5 markets, take the nearly fill-free ones, then rank them by net $/day
-  max_fills_per_day: null # off: "zero fills" missed 8 of 13 real fills and banned the top earner
+  max_fills_per_day: null # off: no liquid market has zero replayed fills; min_volume_24h and
+  # max_fill_cost_share keep us out of the markets where fills cost most
+  min_fill_risk_trades: 20 # fewer trades in the replay window: fill risk unknown, not 0%: skip
   catalog_refresh_seconds: 600 # reuse the program/market list for 10 min; books are always fresh
   incumbent_bonus: 0.25 # a newcomer must pay 25%+ more to take a held market's slot
   min_hold_seconds: 14400 # a picked market keeps its slot 4h while it passes the filters
@@ -80,6 +91,7 @@ selection:
       KXWORLDNEWSMENTION, # resolves the moment a word appears: same jump as the Trump mentions
       KXTTELITEMATCH, # live table tennis: in-play matches jump with every point
       KXTRUMPSAYCOMPANY,
+      KXTRUMPSAYMONTH, # resolves the moment he says the word, like the mention markets
       # Published-number markets: price jumps when the data comes out. Thin books, so the
       # fill model sees no risk until it happens. Rewards there didn't cover a single fill.
       KXTOKENUSE, # -$2.08: 0.45 -> 0.11
@@ -117,25 +129,27 @@ quoting:
   default_target_size: 500
   default_discount_factor: 0.5
   post_only: true # maker only: never cross the spread with a quote (exits are the only takers)
-  min_cushion: 100 # others' contracts ahead of us, capped per market at Target Size / 5 (full credit)
-  min_quote_life_seconds: 10 # no reward-chasing moves for 10s (safety moves still immediate)
+  min_cushion: 250 # others' contracts ahead of us, capped per market at Target Size / 5 (full credit)
+  min_quote_life_seconds: 0 # off: a resting order moves down as soon as a safer price is better (no 10s grace)
 
 risk:
-  max_capital: 260 # $ cap: position cost + cash locked in resting orders (actual $, per price)
+  max_capital: 450 # $ cap: position cost + cash locked in resting orders (actual $, per price)
   scale_with_budget: true # size the 6 settings marked (budget) from max_capital: change the budget
   # and they follow. per side = max_capital x 0.95 / (max_markets x 2); see config.budget_scaled
-  max_position_per_market: 150 # (budget: ignored while scale_with_budget is on) also caps order size; keep >= quoting.max_size
+  split_budget_over_selected: true # spread the budget over the markets picked, not all max_markets
+  # slots: 5 picked of 10 -> each gets 2 slots' worth ($42.75/side at $450), so most of it is used
+  budget_min_markets: 3 # ...but never over fewer than 3: 1 market can't take the whole budget
+  max_position_per_market: 50 # (budget: ignored while scale_with_budget is on) also caps order size; keep >= quoting.max_size
   max_total_exposure: 40 # (budget: ignored while scale_with_budget is on) with flatten_on_fill, positions only last until the exit fills
   flatten_on_fill: true # never hold shares: on a fill, pull that market's quotes and get out
-  # How: a fill comes from a sweep that just emptied the bids, so crossing at once sells at the
-  # worst price. On our first 10 measured fills, crossing at once lost $6.33; the price an hour
-  # later was ~$3.90 better. So rest an exit at the entry price, and cross only when:
-  exit_mode: passive
-  unwind_seconds: 900 # ...15 min pass without getting out,
-  unwind_stop: 0.05 # ...others offer our side 5c+ below entry (a real move, not an empty bid),
-  unwind_giveup: 0 # (rest exactly at entry: break even)
-  # ...the bid comes back to the entry, or the market is about to close. Halts, the dashboard's
-  # flatten button and shutdown always cross at once.
+  # How: cross the book at once (an immediate-or-cancel order, up to flatten_slippage through the
+  # best price, retried every flatten_retry_seconds until flat).
+  exit_mode: immediate # passive is also switched off in code (engine.unwind.PASSIVE_UNWIND_ENABLED):
+  # on Oct 5 resting at entry never filled after a real move, then crossed 15m later at a worse price
+  # (passive only:)
+  unwind_seconds: 900
+  unwind_stop: 0.05
+  unwind_giveup: 0
   flatten_slippage: 0.02 # a crossing exit may trade up to 2c through the best price
   flatten_retry_seconds: 2
   max_session_loss: 20 # (budget: ignored while scale_with_budget is on) halt and cancel everything: 2 worst-case fills, or ~10 typical ones
@@ -144,12 +158,15 @@ risk:
   fill_burst_contracts: 2 # any fill of 2+ contracts pauses that market...
   fill_burst_window_seconds: 300
   cooldown_seconds: 300 # ...for 5 minutes (it keeps its slot)
-  close_buffer_seconds: 7200
+  close_buffer_seconds: 7200 # 2h before close or expected resolution: stop quoting, get out
   max_consecutive_errors: 5
   max_mid_move: 0.04 # mid moves 4c within 60s -> news; pause the market
   mid_move_window_seconds: 60
   order_group_contracts_limit: 300 # (budget: ignored while scale_with_budget is on) exchange-side: >2 full fills (2 x max_size) in 15s cancels
   # everything. Exits are sent outside the group, so flattening never trips it.
+
+scanner:
+  top: 300 # rows the dashboard's scanner reports (and its filters work on)
 
 logging:
   level: INFO

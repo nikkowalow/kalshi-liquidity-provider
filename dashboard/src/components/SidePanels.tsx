@@ -57,7 +57,7 @@ const FILL_ACCESSORS: Accessors<FillEvent> = {
   Pos: (f) => (f.post_position === null ? null : Number(f.post_position)),
 }
 
-export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journal: Journal }) {
+export function RestingOrders({ orders }: { orders: OrderRow[] }) {
   const orderSort = useSort('orders')
   const byTicker = [...orders].sort((a, b) => a.ticker.localeCompare(b.ticker) || a.side.localeCompare(b.side))
   const sorted = sortRows(byTicker, ORDER_ACCESSORS, orderSort.state)
@@ -142,6 +142,14 @@ export function OrdersAndFills({ orders, journal }: { orders: OrderRow[]; journa
           </table>
         )}
       </div>
+    </section>
+  )
+}
+
+/** Fills and the trade history: full width, under the markets table. */
+export function FillsPanel({ journal }: { journal: Journal }) {
+  return (
+    <section className="panel span-12">
       <FillsBlock fills={journal.fills} risks={journal.fillRisks} />
     </section>
   )
@@ -157,7 +165,7 @@ const FillsBlock = memo(function FillsBlock({
   fills: FillEvent[]
   risks: FillRiskEvent[]
 }) {
-  const [tab, setTab] = useState<'recent' | 'history'>('recent')
+  const [tab, setTab] = useState<'recent' | 'history'>('history')
   const trips = useMemo(() => roundTrips(fills), [fills])
   const closed = trips.filter((t) => t.pnl !== null)
   const total = closed.reduce((sum, t) => sum + (t.pnl ?? 0), 0)
@@ -239,7 +247,7 @@ function RecentFills({ fills: all, risks }: { fills: FillEvent[]; risks: FillRis
   const body = useRef<HTMLDivElement>(null)
   const win = useVirtualRows(body, fills.length)
   return (
-    <div className="body h-sm" ref={body}>
+    <div className="body h-md" ref={body}>
       {fills.length === 0 ? (
         <Empty>no fills yet</Empty>
       ) : (
@@ -304,7 +312,7 @@ function TradeHistory({ trips: all }: { trips: RoundTrip[] }) {
   const trips = useMemo(() => sortRows(all, TRIP_ACCESSORS, sorter.state), [all, sorter.state])
   if (!trips.length) {
     return (
-      <div className="body h-sm">
+      <div className="body h-md">
         <Empty>no trades yet</Empty>
       </div>
     )
@@ -315,7 +323,7 @@ function TradeHistory({ trips: all }: { trips: RoundTrip[] }) {
     </SortTh>
   )
   return (
-    <div className="body h-sm">
+    <div className="body h-md">
       <table>
         <thead>
           <tr>

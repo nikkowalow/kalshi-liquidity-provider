@@ -70,3 +70,19 @@ def test_budget_scaling_sizes_everything_from_the_budget() -> None:
     assert half.quoting.max_loss_per_fill == Decimal("11.87")
     off = Settings.model_validate({**base, "risk": {"max_capital": 500, "max_session_loss": 3}})
     assert budget_scaled(off) == off  # scaling off: the file's numbers stand
+
+
+def test_budget_can_be_split_over_fewer_markets() -> None:
+    from kalshi_lp.config import budget_scaled
+
+    s = Settings.model_validate(
+        {
+            "selection": {"max_markets": 10},
+            "quoting": {"capital_utilization": 0.95},
+            "risk": {"max_capital": 500, "scale_with_budget": True, "budget_min_markets": 3},
+        }
+    )
+    assert budget_scaled(s, 5).quoting.max_loss_per_fill == Decimal("47.50")  # 500 x .95 / 10
+    assert budget_scaled(s, 5).risk.max_session_loss == Decimal("95.00")
+    assert budget_scaled(s, 1).quoting.max_loss_per_fill == Decimal("79.16")  # floor: 3 markets
+    assert budget_scaled(s, 40).quoting.max_loss_per_fill == Decimal("23.75")  # at most 10

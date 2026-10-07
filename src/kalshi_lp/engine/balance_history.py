@@ -21,6 +21,10 @@ from kalshi_lp.core.types import ZERO
 NOISE = Decimal("0.01")  # rounding: smaller unexplained moves are ignored
 HOLD_SECONDS = 60.0  # an unexplained jump must hold this long to count (fills post late)
 HOLD_SAMPLES = 6  # ...and through this many later samples
+# A listed change can reach the balance minutes after its own time (a crypto deposit took 4):
+# the balance then looks short, and catching up looks like a credit. A debit and a credit of
+# the same size this close together are that, not a payout.
+LATE_POSTING_SECONDS = 1800.0
 
 
 def _d(value: object) -> Decimal:
@@ -156,7 +160,27 @@ def unlisted_changes(
                 }
             )
             level = r
-    return out
+    return _drop_late_postings(out)
+
+
+def _drop_late_postings(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove each unexplained debit that a credit of the same amount soon cancels."""
+    dropped: set[int] = set()
+    for i, debit in enumerate(changes):
+        if debit["kind"] != "unexplained" or i in dropped:
+            continue
+        for j in range(i + 1, len(changes)):
+            credit = changes[j]
+            if credit["ts"] - debit["ts"] > LATE_POSTING_SECONDS:
+                break
+            if (
+                j not in dropped
+                and credit["kind"] == "reward"
+                and (abs(credit["amount"] + debit["amount"]) < NOISE)
+            ):
+                dropped |= {i, j}
+                break
+    return [c for k, c in enumerate(changes) if k not in dropped]
 
 
 def history(

@@ -129,13 +129,16 @@ class LiquidityBot:
         settings = budget_scaled(settings)  # load_settings did already; settings built in code too
         self.settings = settings
         self.engine = QuoteEngine(settings.quoting, settings.risk.max_position_per_market)
+        # Selection has its own engine: it always sizes candidates at the full max_markets
+        # split, even when quoting concentrates the budget (risk.split_budget_over_selected).
         self.selector = MarketSelector(
             client,
             settings.selection,
             settings.quoting,
-            self.engine,
+            QuoteEngine(settings.quoting, settings.risk.max_position_per_market),
             max_capital=settings.risk.max_capital,
         )
+        self._budget_markets = settings.selection.max_markets  # markets the budget is split over
         self.risk = RiskManager(settings.risk)
         # Read-only research for the dashboard: never changes what the bot trades.
         self.scanner = (
@@ -506,6 +509,7 @@ class LiquidityBot:
     async def reselect(self) -> None:
         """Scan for the best-paying markets and switch to them."""
         self._adopt(await self._scan())
+        await self._rebudget()
 
     async def _scan(self) -> _Scan:
         """Rank markets (the slow part: order books and trades over the API).
@@ -1302,6 +1306,7 @@ class LiquidityBot:
         scan = await self._scan()  # no lock: the bot keeps quoting during the scan
         async with self._lock:
             self._adopt(scan)
+            await self._rebudget()
         await self.feed.set_tickers(self.markets)
         self.state.changed.set()
 
@@ -1494,7 +1499,9 @@ class LiquidityBot:
         """
         old = self.settings.risk.max_capital
         risk = self.settings.risk.model_copy(update={"max_capital": value})
-        self._use_settings(budget_scaled(self.settings.model_copy(update={"risk": risk})))
+        self._use_settings(
+            budget_scaled(self.settings.model_copy(update={"risk": risk}), self._budget_markets)
+        )
         group, limit = self.executor.order_group_id, self.settings.risk.order_group_contracts_limit
         if group and not self.settings.dry_run and limit > 0:
             await self.client.update_order_group_limit(group, limit)
@@ -1503,12 +1510,51 @@ class LiquidityBot:
         self.state.mark_dirty(self.markets)
         return old
 
+    async def _rebudget(self) -> None:
+        """risk.split_budget_over_selected: spread the budget over the markets selected now.
+
+        5 markets picked of 10 slots: each gets the budget of 2, so most of it is used.
+        Resizes every market's quotes on the next requote. Caller holds ``self._lock``
+        (or nothing is quoting yet).
+        """
+        risk = self.settings.risk
+        if not (risk.scale_with_budget and risk.split_budget_over_selected):
+            return
+        quoting = [t for t in self.markets if t not in self.reduce_only]
+        slots = self.settings.selection.max_markets
+        split = min(max(len(quoting) or slots, risk.budget_min_markets), slots)
+        if split == self._budget_markets:
+            return
+        self._budget_markets = split
+        self._use_settings(budget_scaled(self.settings, split))
+        group, limit = self.executor.order_group_id, self.settings.risk.order_group_contracts_limit
+        if group and not self.settings.dry_run and limit > 0:
+            await self.client.update_order_group_limit(group, limit)
+        q, r = self.settings.quoting, self.settings.risk
+        log.info(
+            "budget: $%s over %d market(s): $%s/side, up to %s contracts; "
+            "session loss limit $%s, exposure limit $%s",
+            r.max_capital,
+            split,
+            q.max_loss_per_fill,
+            q.max_size,
+            r.max_session_loss,
+            r.max_total_exposure,
+        )
+        self.state.mark_dirty(self.markets)
+
     def _use_settings(self, settings: Settings) -> None:
         """Switch the running bot to ``settings`` (same structure, new numbers)."""
         self.settings = settings
         self.engine.cfg = settings.quoting
         self.engine.max_position = settings.risk.max_position_per_market
-        self.selector.quoting = settings.quoting
+        # Selection estimates candidates at the full max_markets split. Sized for the
+        # markets it holds now, each would look like it needs more capital, fewer would fit,
+        # and it would stay at a few markets for good.
+        base = budget_scaled(settings, settings.selection.max_markets)
+        self.selector.quoting = base.quoting
+        self.selector.engine.cfg = base.quoting
+        self.selector.engine.max_position = base.risk.max_position_per_market
         self.selector.max_capital = settings.risk.max_capital
         self.risk.cfg = settings.risk
         self._config_json = settings.model_dump(mode="json")
